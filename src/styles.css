@@ -185,3 +185,8 @@ textarea.input.prose { font-family: inherit; font-size: 14px; }
 .btn-danger-solid:hover:not(:disabled) { background: #912018; }
 @media (prefers-reduced-motion: reduce) { .idea-card { transition: none; } }
 @media (max-width: 720px) { .form-grid { grid-template-columns: 1fr; } }
+/* Pagination */
+.pagination { display: flex; align-items: center; justify-content: center; gap: 16px; padding-top: 4px; }
+.offer-more { width: 100%; padding: 10px 12px; border: 0; background: transparent; color: var(--primary); font-weight: 600; cursor: pointer; }
+.offer-more:hover:not(:disabled) { background: #f3f4f6; }
+.offer-more:disabled { color: var(--muted); cursor: default; }

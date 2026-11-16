@@ -98,6 +98,22 @@ impl Idea {
     }
 }
 
+/// How many ideas the Ideas screen shows per page.
+pub const IDEAS_PER_PAGE: u32 = 12;
+
+/// One page of the Ideas screen, plus the totals shown on its two tabs.
+#[derive(Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IdeaPage {
+    pub ideas: Vec<Idea>,
+    pub page: u32,
+    pub last_page: u32,
+    /// Ideas in the requested tab, across all pages.
+    pub total: u32,
+    pub draft_count: u32,
+    pub sent_count: u32,
+}
+
 /// How many ideas were generated from one offer. Ideas imported from the
 /// old JSON store only know the offer's name, so both keys are reported.
 #[derive(Debug, PartialEq, Serialize)]
@@ -204,6 +220,7 @@ fn idea_from_row(row: &Row) -> rusqlite::Result<Idea> {
 }
 
 /// Newest batch first; ideas of one batch keep the order they were planned in.
+#[cfg(test)]
 pub fn list_ideas(conn: &Connection) -> Result<Vec<Idea>, String> {
     let mut statement = conn
         .prepare(&format!("SELECT {IDEA_COLUMNS} FROM ideas ORDER BY created_at DESC, rowid ASC"))
@@ -214,6 +231,54 @@ pub fn list_ideas(conn: &Connection) -> Result<Vec<Idea>, String> {
         .collect::<rusqlite::Result<Vec<Idea>>>()
         .map_err(describe)?;
     Ok(ideas)
+}
+
+/// One page of the drafts (not sent yet) or of the sent ideas, latest first:
+/// drafts by newest batch, sent ideas by when they were last sent. A page
+/// past the end falls back to the last one, so deleting the only idea on the
+/// last page doesn't leave an empty screen.
+pub fn list_ideas_page(conn: &Connection, sent: bool, page: u32, per_page: u32) -> Result<IdeaPage, String> {
+    let (draft_count, sent_count): (i64, i64) = conn
+        .query_row(
+            "SELECT COUNT(*) FILTER (WHERE sent_at IS NULL), COUNT(*) FILTER (WHERE sent_at IS NOT NULL) FROM ideas",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(describe)?;
+
+    let per_page = per_page.max(1);
+    let total = if sent { sent_count } else { draft_count } as u32;
+    let last_page = total.div_ceil(per_page).max(1);
+    let page = page.clamp(1, last_page);
+    let (filter, order) = if sent {
+        ("sent_at IS NOT NULL", "sent_at DESC, rowid DESC")
+    } else {
+        ("sent_at IS NULL", "created_at DESC, rowid ASC")
+    };
+
+    let mut statement = conn
+        .prepare(&format!("SELECT {IDEA_COLUMNS} FROM ideas WHERE {filter} ORDER BY {order} LIMIT ?1 OFFSET ?2"))
+        .map_err(describe)?;
+    let ideas = statement
+        .query_map(params![per_page, (page - 1) * per_page], idea_from_row)
+        .map_err(describe)?
+        .collect::<rusqlite::Result<Vec<Idea>>>()
+        .map_err(describe)?;
+
+    Ok(IdeaPage { ideas, page, last_page, total, draft_count: draft_count as u32, sent_count: sent_count as u32 })
+}
+
+/// Titles of the newest ideas, so a new plan can avoid repeating them.
+pub fn recent_idea_titles(conn: &Connection, limit: u32) -> Result<Vec<String>, String> {
+    let mut statement = conn
+        .prepare("SELECT title FROM ideas ORDER BY created_at DESC, rowid ASC LIMIT ?1")
+        .map_err(describe)?;
+    let titles = statement
+        .query_map([limit], |row| row.get(0))
+        .map_err(describe)?
+        .collect::<rusqlite::Result<Vec<String>>>()
+        .map_err(describe)?;
+    Ok(titles)
 }
 
 /// Inserts all ideas or none. Ideas whose id already exists are skipped.
@@ -406,6 +471,52 @@ mod tests {
 
         assert_eq!(ideas.iter().map(|idea| idea.id.as_str()).collect::<Vec<_>>(), ["new-a", "new-b", "old"]);
         assert_eq!(ideas[0], planned("new-a", 200, Some(1), "Sprint"));
+    }
+
+    #[test]
+    fn drafts_are_paged_newest_first_and_a_page_past_the_end_falls_back() {
+        let mut conn = memory_db();
+        for n in 1..=5 {
+            insert_ideas(&mut conn, &[planned(&format!("d{n}"), n * 100, None, "Sprint")]).unwrap();
+        }
+        insert_ideas(&mut conn, &[planned("sent", 900, None, "Sprint")]).unwrap();
+        mark_sent(&conn, "sent", Some(1), 1000).unwrap();
+        let ids = |page: &IdeaPage| page.ideas.iter().map(|idea| idea.id.clone()).collect::<Vec<_>>();
+
+        let first = list_ideas_page(&conn, false, 1, 2).unwrap();
+        let beyond = list_ideas_page(&conn, false, 9, 2).unwrap();
+
+        assert_eq!(ids(&first), ["d5", "d4"]);
+        assert_eq!((first.page, first.last_page, first.total), (1, 3, 5));
+        assert_eq!((first.draft_count, first.sent_count), (5, 1));
+        assert_eq!(ids(&beyond), ["d1"]);
+        assert_eq!(beyond.page, 3);
+    }
+
+    #[test]
+    fn sent_ideas_are_paged_by_the_latest_sent_first() {
+        let mut conn = memory_db();
+        insert_ideas(&mut conn, &[planned("a", 300, None, "Sprint"), planned("b", 200, None, "Sprint")]).unwrap();
+        insert_ideas(&mut conn, &[planned("c", 100, None, "Sprint")]).unwrap();
+        mark_sent(&conn, "a", None, 10).unwrap();
+        mark_sent(&conn, "c", None, 30).unwrap();
+        mark_sent(&conn, "b", None, 20).unwrap();
+
+        let page = list_ideas_page(&conn, true, 1, 2).unwrap();
+        let empty = list_ideas_page(&conn, false, 1, 2).unwrap();
+
+        assert_eq!(page.ideas.iter().map(|idea| idea.id.as_str()).collect::<Vec<_>>(), ["c", "b"]);
+        assert_eq!((page.last_page, page.total), (2, 3));
+        assert_eq!((empty.ideas.len(), empty.page, empty.last_page, empty.total), (0, 1, 1, 0));
+    }
+
+    #[test]
+    fn recent_titles_come_newest_first_and_stop_at_the_limit() {
+        let mut conn = memory_db();
+        insert_ideas(&mut conn, &[planned("old", 100, None, "Sprint")]).unwrap();
+        insert_ideas(&mut conn, &[planned("new-a", 200, None, "Sprint"), planned("new-b", 200, None, "Sprint")]).unwrap();
+
+        assert_eq!(recent_idea_titles(&conn, 2).unwrap(), ["Title new-a", "Title new-b"]);
     }
 
     #[test]

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, reactive, ref } from "vue";
+import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from "vue";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import {
   api,
@@ -24,13 +24,21 @@ const monday = nextMonday();
 const step = ref(1);
 const loading = ref(true);
 const error = ref("");
+/** Offers loaded so far for the current search, newest first. */
 const offers = ref<Offer[]>([]);
+const offerPage = ref(1);
+const offerLastPage = ref(1);
+const offersLoading = ref(false);
+/** Whether the site has any offers at all, whatever the search says. */
+const hasOffers = ref(false);
 const ideaCounts = ref<OfferIdeaCount[]>([]);
 const clis = ref<CliStatus[]>([]);
 
 const counts = reactive<Record<string, number>>(Object.fromEntries(channels.map((c) => [c.id, c.defaultCount])));
 const offerSearch = ref("");
-const offerId = ref<number | null>(null);
+/** Kept as a whole offer so the pick survives searching and paging. */
+const offer = ref<Offer | null>(null);
+const offerId = computed(() => offer.value?.id ?? null);
 const mode = ref<"ai" | "swipe">("ai");
 const provider = ref("");
 const withImages = ref(false);
@@ -45,17 +53,13 @@ const elapsed = ref(0);
 const neededTools = ref<string[]>([]);
 let timer: number | undefined;
 let unlisten: UnlistenFn | undefined;
+let searchTimer: number | undefined;
+let offerRequest = 0;
 
 const total = computed(() => Object.values(counts).reduce((sum, n) => sum + n, 0));
 const activeChannels = computed(() => channels.filter((c) => counts[c.id] > 0));
 const installed = computed(() => clis.value.filter((c) => c.installed));
-const offer = computed(() => offers.value.find((o) => o.id === offerId.value));
 const providerName = computed(() => clis.value.find((c) => c.id === provider.value)?.name ?? "The AI agent");
-const filteredOffers = computed(() => {
-  const query = offerSearch.value.trim().toLowerCase();
-  if (!query) return offers.value;
-  return offers.value.filter((o) => `${o.name} ${o.promise} ${o.description ?? ""}`.toLowerCase().includes(query));
-});
 const elapsedLabel = computed(() => {
   const minutes = Math.floor(elapsed.value / 60);
   return `${minutes}:${String(elapsed.value % 60).padStart(2, "0")}`;
@@ -70,12 +74,9 @@ const canContinue = computed(() => {
 onMounted(async () => {
   unlisten = await listen<PlanProgress>("plan-progress", ({ payload }) => onProgress(payload));
   try {
-    [offers.value, clis.value, ideaCounts.value] = await Promise.all([
-      api.listOffers(),
-      api.detectClis(),
-      api.offerIdeaCounts(),
-    ]);
-    offerId.value = offers.value[0]?.id ?? null;
+    [, clis.value, ideaCounts.value] = await Promise.all([loadOffers(1), api.detectClis(), api.offerIdeaCounts()]);
+    hasOffers.value = offers.value.length > 0;
+    offer.value = offers.value[0] ?? null;
     provider.value = installed.value[0]?.id ?? "";
   } catch (caught) {
     error.value = errorMessage(caught);
@@ -87,6 +88,39 @@ onMounted(async () => {
 onUnmounted(() => {
   unlisten?.();
   window.clearInterval(timer);
+  window.clearTimeout(searchTimer);
+});
+
+/**
+ * Loads a page of offers matching the search box. Page 1 replaces the list;
+ * later pages are added below it. The server searches every offer, so one
+ * that is not loaded yet can still be found.
+ */
+async function loadOffers(page: number) {
+  const request = ++offerRequest;
+  offersLoading.value = true;
+  try {
+    const result = await api.listOffers(page, offerSearch.value);
+    if (request !== offerRequest) return; // a newer search replaced this one
+    offers.value = page === 1 ? result.offers : [...offers.value, ...result.offers];
+    offerPage.value = result.meta.current_page;
+    offerLastPage.value = result.meta.last_page;
+  } finally {
+    if (request === offerRequest) offersLoading.value = false;
+  }
+}
+
+async function searchOffers(page: number) {
+  try {
+    await loadOffers(page);
+  } catch (caught) {
+    error.value = errorMessage(caught);
+  }
+}
+
+watch(offerSearch, () => {
+  window.clearTimeout(searchTimer);
+  searchTimer = window.setTimeout(() => searchOffers(1), 300);
 });
 
 function onProgress(progress: PlanProgress) {
@@ -198,18 +232,18 @@ async function allowAndRetry() {
 
       <div class="field">
         <label for="offer-search">Focus offer (primary CTA and case angle)</label>
-        <template v-if="offers.length">
+        <template v-if="hasOffers">
           <input id="offer-search" v-model="offerSearch" class="input" type="search" placeholder="Search offers by name or promise" />
-          <div class="offer-list" role="radiogroup" aria-label="Focus offer">
+          <div class="offer-list" role="radiogroup" aria-label="Focus offer" :aria-busy="offersLoading">
             <button
-              v-for="item in filteredOffers"
+              v-for="item in offers"
               :key="item.id"
               type="button"
               class="offer-option"
               :class="{ selected: offerId === item.id }"
               role="radio"
               :aria-checked="offerId === item.id"
-              @click="offerId = item.id"
+              @click="offer = item"
             >
               <span class="offer-option-text">
                 <b>{{ item.name }}</b>
@@ -219,7 +253,19 @@ async function allowAndRetry() {
                 {{ ideaCountFor(item, ideaCounts) }} {{ ideaCountFor(item, ideaCounts) === 1 ? "idea" : "ideas" }}
               </span>
             </button>
-            <div v-if="!filteredOffers.length" class="offer-empty">
+            <button
+              v-if="offerPage < offerLastPage"
+              type="button"
+              class="offer-more"
+              :disabled="offersLoading"
+              @click="searchOffers(offerPage + 1)"
+            >
+              {{ offersLoading ? "Loading…" : "Load more offers" }}
+            </button>
+            <div v-if="!offers.length && offersLoading" class="offer-empty">
+              <span class="muted">Searching offers…</span>
+            </div>
+            <div v-else-if="!offers.length" class="offer-empty">
               <span class="muted">No offers match "{{ offerSearch }}".</span>
               <button type="button" class="btn btn-sm" @click="offerSearch = ''">Clear search</button>
             </div>

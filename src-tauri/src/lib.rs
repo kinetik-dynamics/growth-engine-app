@@ -98,10 +98,14 @@ fn logout(app: AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
-async fn list_offers(app: AppHandle) -> Result<Value, String> {
+async fn list_offers(app: AppHandle, page: Option<u32>, search: Option<String>) -> Result<Value, String> {
     let config = signed_in(&app)?;
-    let body = api::get(&config.session.base_url, &config.token, "/api/offers").await?;
-    Ok(body["offers"].clone())
+    let mut query = vec![("page", page.unwrap_or(1).max(1).to_string())];
+    if let Some(search) = search.map(|search| search.trim().to_string()).filter(|search| !search.is_empty()) {
+        query.push(("search", search));
+    }
+    // The server answers `{ offers, meta }`: one page, newest offers first.
+    api::get_query(&config.session.base_url, &config.token, "/api/offers", &query).await
 }
 
 #[tauri::command]
@@ -163,26 +167,24 @@ fn reset_skill(app: AppHandle) -> Result<String, String> {
 }
 
 #[tauri::command]
-fn list_ideas(app: AppHandle) -> Result<Vec<Idea>, String> {
-    db::list_ideas(&store::database(&app)?)
+fn list_ideas(app: AppHandle, tab: String, page: Option<u32>) -> Result<db::IdeaPage, String> {
+    db::list_ideas_page(&store::database(&app)?, tab == "sent", page.unwrap_or(1), db::IDEAS_PER_PAGE)
 }
 
 #[tauri::command]
-fn add_idea(app: AppHandle, title: String) -> Result<Vec<Idea>, String> {
+fn add_idea(app: AppHandle, title: String) -> Result<Idea, String> {
     let title = title.trim().to_string();
     if title.is_empty() {
         return Err("Type an idea first.".into());
     }
-    let mut conn = store::database(&app)?;
-    db::insert_ideas(&mut conn, &[Idea::manual(title, now_ms())])?;
-    db::list_ideas(&conn)
+    let idea = Idea::manual(title, now_ms());
+    db::insert_ideas(&mut store::database(&app)?, std::slice::from_ref(&idea))?;
+    Ok(idea)
 }
 
 #[tauri::command]
-fn delete_idea(app: AppHandle, id: String) -> Result<Vec<Idea>, String> {
-    let conn = store::database(&app)?;
-    db::delete_idea(&conn, &id)?;
-    db::list_ideas(&conn)
+fn delete_idea(app: AppHandle, id: String) -> Result<(), String> {
+    db::delete_idea(&store::database(&app)?, &id)
 }
 
 /// Saves the edits made on an idea's page.
@@ -240,20 +242,24 @@ async fn generate_plan(app: AppHandle, request: plan::PlanRequest) -> Result<Pla
     let agent = cli::provider_name(&request.provider);
 
     report(&app, "stage", format!("Loading the offer and company profile from {base_url}"));
-    let offers = api::get(base_url, &config.token, "/api/offers").await?;
-    let offer = offers["offers"]
-        .as_array()
-        .and_then(|offers| offers.iter().find(|offer| offer["id"].as_i64() == Some(request.offer_id)))
-        .cloned()
-        .ok_or("That offer no longer exists on the server. Go back and pick another.")?;
+    // Fetched on its own: the offers list is paginated, so the pick may be on any page.
+    let offer = api::get(base_url, &config.token, &format!("/api/offers/{}", request.offer_id))
+        .await
+        .map_err(|error| {
+            if error.contains(" 404 ") {
+                "That offer no longer exists on the server. Go back and pick another.".to_string()
+            } else {
+                error
+            }
+        })?["offer"]
+        .clone();
     let company = api::get(base_url, &config.token, "/api/me").await?["company"].clone();
     let offer_name = text(&offer["name"]);
 
     let skill = store::load_skill(&app)?;
     let (existing_titles, allowed_tools) = {
         let conn = store::database(&app)?;
-        let titles: Vec<String> = db::list_ideas(&conn)?.into_iter().take(40).map(|idea| idea.title).collect();
-        (titles, db::allowed_tools(&conn, &request.provider)?)
+        (db::recent_idea_titles(&conn, 40)?, db::allowed_tools(&conn, &request.provider)?)
     };
     let prompt = plan::build_prompt(&skill, &company, &offer, &request.slots, request.with_images, &existing_titles);
     report(

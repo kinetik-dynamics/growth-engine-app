@@ -20,7 +20,12 @@ fn client() -> Result<reqwest::Client, String> {
 }
 
 pub async fn get(base_url: &str, token: &str, path: &str) -> Result<Value, String> {
-    let request = client()?.get(format!("{base_url}{path}"));
+    get_query(base_url, token, path, &[]).await
+}
+
+/// A GET with query parameters, which are URL-encoded for the caller.
+pub async fn get_query(base_url: &str, token: &str, path: &str, query: &[(&str, String)]) -> Result<Value, String> {
+    let request = client()?.get(format!("{base_url}{path}")).query(query);
     send(request, base_url, token, path).await
 }
 

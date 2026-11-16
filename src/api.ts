@@ -20,6 +20,25 @@ export interface Offer {
   case_studies: { id: number; title: string; client_name: string | null; result: string }[];
 }
 
+/** One page of offers from the server, newest first. */
+export interface OfferPage {
+  offers: Offer[];
+  meta: { current_page: number; last_page: number; per_page: number; total: number };
+}
+
+export type IdeaTab = "drafts" | "sent";
+
+/** One page of the local ideas, latest first, plus the totals of both tabs. */
+export interface IdeaPage {
+  ideas: Idea[];
+  page: number;
+  lastPage: number;
+  /** Ideas in the requested tab, across all pages. */
+  total: number;
+  draftCount: number;
+  sentCount: number;
+}
+
 export interface CliStatus {
   id: string;
   name: string;
@@ -121,15 +140,15 @@ export const api = {
   getSession: () => invoke<Session | null>("get_session"),
   login: (baseUrl: string, token: string) => invoke<Session>("login", { baseUrl, token }),
   logout: () => invoke<void>("logout"),
-  listOffers: () => invoke<Offer[]>("list_offers"),
+  listOffers: (page = 1, search = "") => invoke<OfferPage>("list_offers", { page, search }),
   detectClis: () => invoke<CliStatus[]>("detect_clis"),
   testCli: (provider: string) => invoke<string>("test_cli", { provider }),
   getSkill: () => invoke<string>("get_skill"),
   saveSkill: (content: string) => invoke<void>("save_skill", { content }),
   resetSkill: () => invoke<string>("reset_skill"),
-  listIdeas: () => invoke<Idea[]>("list_ideas"),
-  addIdea: (title: string) => invoke<Idea[]>("add_idea", { title }),
-  deleteIdea: (id: string) => invoke<Idea[]>("delete_idea", { id }),
+  listIdeas: (tab: IdeaTab, page = 1) => invoke<IdeaPage>("list_ideas", { tab, page }),
+  addIdea: (title: string) => invoke<Idea>("add_idea", { title }),
+  deleteIdea: (id: string) => invoke<void>("delete_idea", { id }),
   generatePlan: (request: PlanRequest) => invoke<PlanOutcome>("generate_plan", { request }),
 };
 

@@ -4,7 +4,7 @@ import { api, errorMessage, type Idea, type IdeaEdit, type Session } from "../ap
 import { channelsFor } from "../channels";
 
 const props = defineProps<{ idea: Idea; session: Session }>();
-const emit = defineEmits<{ close: []; saved: [idea: Idea]; deleted: [remaining: Idea[]] }>();
+const emit = defineEmits<{ close: []; saved: [idea: Idea]; deleted: [] }>();
 
 const channels = channelsFor(props.session.websiteUrl);
 
@@ -91,7 +91,8 @@ async function remove() {
   error.value = "";
   busy.value = "deleting";
   try {
-    emit("deleted", await api.deleteIdea(form.id));
+    await api.deleteIdea(form.id);
+    emit("deleted");
   } catch (caught) {
     error.value = errorMessage(caught);
     busy.value = "";
