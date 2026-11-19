@@ -50,43 +50,6 @@ jobs:
             - **MSI** — Windows Installer package
           releaseDraft: false
           prerelease: false
+          includeUpdaterJson: true
+          updaterJsonPreferNsis: true
           args: --target x86_64-pc-windows-msvc
-
-      - name: Generate update manifest (latest.json)
-        shell: pwsh
-        run: |
-          $version = "${{ github.ref_name }}" -replace '^v', ''
-          $tag = "${{ github.ref_name }}"
-          $baseUrl = "https://github.com/kinetik-dynamics/growth-engine-app/releases/download/$tag"
-          $nsisDir = "$env:GITHUB_WORKSPACE\src-tauri\target\x86_64-pc-windows-msvc\release\bundle\nsis"
-
-          $zipFile = Get-ChildItem $nsisDir -Filter "*.nsis.zip" |
-            Where-Object { $_.Name -notlike "*.sig" } |
-            Select-Object -First 1
-
-          if (-not $zipFile) { throw "NSIS zip not found in $nsisDir" }
-
-          $sig = (Get-Content "$($zipFile.FullName).sig" -Raw).Trim()
-
-          $manifest = [ordered]@{
-            version  = $version
-            notes    = "See full release notes: https://github.com/kinetik-dynamics/growth-engine-app/releases/tag/$tag"
-            pub_date = (Get-Date -Format "yyyy-MM-ddTHH:mm:ss.fffZ")
-            platforms = [ordered]@{
-              "windows-x86_64" = [ordered]@{
-                signature = $sig
-                url       = "$baseUrl/$($zipFile.Name)"
-              }
-            }
-          }
-
-          $manifest | ConvertTo-Json -Depth 5 | Set-Content "latest.json" -Encoding utf8NoBOM
-          Write-Output "Generated latest.json — update URL: $baseUrl/$($zipFile.Name)"
-
-      - name: Upload latest.json to release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ github.ref_name }}
-          files: latest.json
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
