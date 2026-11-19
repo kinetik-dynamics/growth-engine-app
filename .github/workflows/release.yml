@@ -58,7 +58,7 @@ jobs:
           $version = "${{ github.ref_name }}" -replace '^v', ''
           $tag = "${{ github.ref_name }}"
           $baseUrl = "https://github.com/kinetik-dynamics/growth-engine-app/releases/download/$tag"
-          $nsisDir = "src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis"
+          $nsisDir = "$env:GITHUB_WORKSPACE\src-tauri\target\x86_64-pc-windows-msvc\release\bundle\nsis"
 
           $zipFile = Get-ChildItem $nsisDir -Filter "*.nsis.zip" |
             Where-Object { $_.Name -notlike "*.sig" } |
