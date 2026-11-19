@@ -1,10 +1,19 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref } from "vue";
 import { api, errorMessage, type CliStatus, type Permission, type Session } from "../api";
+import {
+  checkForUpdate,
+  installUpdate,
+  updateAvailable,
+  updateChecking,
+  updateError,
+  updateInstalling,
+  updateProgress,
+} from "../updater";
 
 defineProps<{ session: Session }>();
 
-const tab = ref<"agents" | "skill">("agents");
+const tab = ref<"agents" | "skill" | "updates">(updateAvailable.value ? "updates" : "agents");
 
 /* AI agents */
 const clis = ref<CliStatus[] | null>(null);
@@ -113,12 +122,15 @@ onMounted(() => {
         <button class="tab" :class="{ active: tab === 'skill' }" role="tab" :aria-selected="tab === 'skill'" @click="tab = 'skill'">
           Idea skill{{ dirty ? " •" : "" }}
         </button>
+        <button class="tab" :class="{ active: tab === 'updates' }" role="tab" :aria-selected="tab === 'updates'" @click="tab = 'updates'">
+          Updates{{ updateAvailable ? " ●" : "" }}
+        </button>
       </div>
     </div>
     <span class="muted small">Connected to {{ session.baseUrl }}</span>
   </header>
 
-  <div v-if="tab === 'agents'" class="page-body">
+  <div v-if="tab === 'agents'" class="page-body" >
     <div class="row-between">
       <p class="muted">Ideas are written by AI agent CLIs installed on this computer. The app finds them on your PATH.</p>
       <button class="btn" :disabled="!clis" @click="scan">
@@ -169,7 +181,52 @@ onMounted(() => {
     </div>
   </div>
 
-  <div v-else class="page-body">
+  <div v-else-if="tab === 'updates'" class="page-body" style="max-width: 600px">
+    <div class="card stack">
+      <div class="row-between">
+        <div>
+          <h2>App updates</h2>
+          <p class="muted small" style="margin-top: 4px">Growth Engine checks for updates automatically on launch.</p>
+        </div>
+        <button class="btn" :disabled="updateChecking || updateInstalling" @click="checkForUpdate">
+          <span v-if="updateChecking" class="spinner"></span>
+          {{ updateChecking ? "Checking…" : "Check now" }}
+        </button>
+      </div>
+
+      <div v-if="!updateAvailable && !updateChecking" class="alert alert-success" role="status">
+        You're up to date.
+      </div>
+
+      <template v-if="updateAvailable">
+        <div class="update-info">
+          <div class="row" style="gap: 10px">
+            <span class="badge badge-primary">v{{ updateAvailable.version }} available</span>
+          </div>
+          <div v-if="updateAvailable.body" class="update-notes">{{ updateAvailable.body }}</div>
+        </div>
+
+        <div v-if="updateInstalling" class="stack" style="gap: 8px">
+          <div class="row-between">
+            <span class="small">Downloading update…</span>
+            <span class="small muted">{{ updateProgress }}%</span>
+          </div>
+          <div class="progress-bar">
+            <div class="progress-fill" :style="{ width: updateProgress + '%' }"></div>
+          </div>
+          <p class="muted small">The app will restart automatically when the update is ready.</p>
+        </div>
+
+        <button v-else class="btn btn-primary" style="align-self: flex-start" @click="installUpdate">
+          Install update v{{ updateAvailable.version }}
+        </button>
+      </template>
+
+      <div v-if="updateError" class="alert alert-error" role="alert">{{ updateError }}</div>
+    </div>
+  </div>
+
+  <div v-else-if="tab === 'skill'" class="page-body">
     <div class="field">
       <label for="skill">Idea skill</label>
       <p class="muted small">These instructions are sent to the AI agent with every plan. Edit them to change how ideas are written.</p>

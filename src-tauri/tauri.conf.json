@@ -23,6 +23,15 @@
       "csp": null
     }
   },
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://github.com/kinetik-dynamics/growth-engine-app/releases/latest/download/latest.json"
+      ],
+      "dialog": false,
+      "pubkey": "REPLACE_WITH_OUTPUT_OF_npx_tauri_signer_generate"
+    }
+  },
   "bundle": {
     "active": true,
     "targets": "all",

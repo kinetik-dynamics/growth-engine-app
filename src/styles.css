@@ -80,6 +80,12 @@ textarea.input { height: auto; padding: 12px; resize: vertical; font-family: Con
 .nav-item.active { background: var(--primary-soft); color: var(--primary); font-weight: 600; }
 .sidebar-foot { margin-top: auto; padding: 12px 8px 0; border-top: 1px solid var(--border); display: flex; flex-direction: column; gap: 8px; }
 .sidebar-foot .name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.version-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.btn-icon { width: 22px; height: 22px; border: 0; border-radius: 5px; background: transparent; cursor: pointer; display: grid; place-items: center; color: var(--muted); flex: none; padding: 0; }
+.btn-icon:hover:not(:disabled) { background: #f3f4f6; color: var(--text); }
+.btn-icon:disabled { opacity: 0.5; cursor: not-allowed; }
+.btn-icon.has-update { color: var(--primary); background: var(--primary-soft); }
+.btn-icon.has-update:hover:not(:disabled) { background: #dce9ff; }
 
 .main { overflow-y: auto; }
 .page-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 16px 32px; background: var(--surface); border-bottom: 1px solid var(--border); position: sticky; top: 0; z-index: 5; }
@@ -185,6 +191,12 @@ textarea.input.prose { font-family: inherit; font-size: 14px; }
 .btn-danger-solid:hover:not(:disabled) { background: #912018; }
 @media (prefers-reduced-motion: reduce) { .idea-card { transition: none; } }
 @media (max-width: 720px) { .form-grid { grid-template-columns: 1fr; } }
+/* Update panel */
+.update-info { display: flex; flex-direction: column; gap: 10px; }
+.update-notes { white-space: pre-wrap; font-size: 13px; line-height: 1.6; color: var(--muted); border-left: 3px solid var(--border-strong); padding-left: 12px; }
+.progress-bar { height: 6px; background: var(--border); border-radius: 999px; overflow: hidden; }
+.progress-fill { height: 100%; background: var(--primary); border-radius: 999px; transition: width 0.3s ease; }
+
 /* Pagination */
 .pagination { display: flex; align-items: center; justify-content: center; gap: 16px; padding-top: 4px; }
 .offer-more { width: 100%; padding: 10px 12px; border: 0; background: transparent; color: var(--primary); font-weight: 600; cursor: pointer; }
