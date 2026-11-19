@@ -29,7 +29,7 @@
         "https://github.com/kinetik-dynamics/growth-engine-app/releases/latest/download/latest.json"
       ],
       "dialog": false,
-      "pubkey": "REPLACE_WITH_OUTPUT_OF_npx_tauri_signer_generate"
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDBDRUFDQTNDNzBEN0JDRjYKUldUMnZOZHdQTXJxREpCamJSb3gxbXdoRmV0QXV3dkxoQ3VrK1gyL3drcDRYbS9NZ0ZYd0E3VDAK"
     }
   },
   "bundle": {
