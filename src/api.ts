@@ -180,9 +180,11 @@ export interface SiteIcp {
   pain: string | null;
   criteria: string[] | null;
   offers: Named[];
+  drafted_by_agent: boolean;
   leads_count: number;
   prospects_count: number;
   searches_count: number;
+  updated_at: string;
 }
 
 export interface SiteProof {
@@ -217,7 +219,7 @@ export interface SitePost {
 
 export interface SitePages {
   overview: { overview: Overview | null };
-  icps: { icps: SiteIcp[] };
+  icps: { icps: SiteIcp[]; offerOptions: Named[] };
   proof: { proof: SiteProof[] };
   publish: { channels: PublishChannel[]; posts: SitePost[] };
 }
