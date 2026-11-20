@@ -5,12 +5,16 @@ import {
   api,
   errorMessage,
   ideaCountFor,
+  type ChannelSkill,
   type CliStatus,
   type Idea,
+  type ImageApiStatus,
   type Offer,
   type OfferIdeaCount,
   type PlanProgress,
+  type Skill,
 } from "../api";
+import { settingsSection } from "../settingsNav";
 import { channelsFor, MAX_POSTS_PER_CHANNEL, nextMonday, slotsFor, weekLabel } from "../channels";
 import Icon from "../components/Icon.vue";
 import PlatformIcon from "../components/PlatformIcon.vue";
@@ -50,6 +54,17 @@ const offerId = computed(() => offer.value?.id ?? null);
 const mode = ref<"ai" | "swipe">("ai");
 const provider = ref("");
 const withImages = ref(false);
+/** With images: draw them with the image API, or only write each idea's image prompt. */
+const imageMode = ref<"generate" | "prompt">("prompt");
+const imageApi = ref<ImageApiStatus | null>(null);
+
+/* Idea skill per channel, prefilled from Settings > Idea skills */
+const skills = ref<Skill[]>([]);
+const channelSkillIds = reactive<Record<string, string>>({});
+const defaultSkill = computed(() => skills.value.find((skill) => skill.isDefault) ?? skills.value[0] ?? null);
+function skillFor(channelId: string) {
+  return skills.value.find((skill) => skill.id === channelSkillIds[channelId]) ?? defaultSkill.value;
+}
 
 /* Generation state */
 const generating = ref(false);
@@ -77,20 +92,31 @@ const hasTopic = computed(() => topicTitle.value.trim() !== "" || topicDescripti
 const canContinue = computed(() => {
   if (step.value === 1) return total.value > 0 && offerId.value !== null;
   if (step.value === 2) return mode.value === "ai" && provider.value !== "";
-  return true;
+  return !(withImages.value && imageMode.value === "generate" && !imageApi.value?.configured);
 });
 /** Why Next is disabled, so the footer can say it instead of leaving the user guessing. */
 const blocker = computed(() => {
   if (loading.value || canContinue.value) return "";
   if (step.value === 1) return total.value === 0 ? "Add at least one post to a channel." : "Pick a focus offer.";
   if (step.value === 2) return "Pick an AI agent to write the ideas.";
+  if (step.value === 3) return "Add an image API key in Settings, or pick image prompts only.";
   return "";
 });
 
 onMounted(async () => {
   unlisten = await listen<PlanProgress>("plan-progress", ({ payload }) => onProgress(payload));
   try {
-    [, clis.value, ideaCounts.value] = await Promise.all([loadOffers(1), api.detectClis(), api.offerIdeaCounts()]);
+    let channelSkills: ChannelSkill[];
+    [, clis.value, ideaCounts.value, skills.value, channelSkills, imageApi.value] = await Promise.all([
+      loadOffers(1),
+      api.detectClis(),
+      api.offerIdeaCounts(),
+      api.listSkills(),
+      api.listChannelSkills(),
+      api.getImageApi(),
+    ]);
+    for (const row of channelSkills) channelSkillIds[row.channelId] = row.skillId;
+    if (imageApi.value.configured) imageMode.value = "generate";
     hasOffers.value = offers.value.length > 0;
     offer.value = offers.value[0] ?? null;
     provider.value = installed.value[0]?.id ?? "";
@@ -182,6 +208,13 @@ async function generate() {
       offerId: offerId.value,
       slots,
       withImages: withImages.value,
+      generateImages: withImages.value && imageMode.value === "generate",
+      channelSkills: Object.fromEntries(
+        activeChannels.value.flatMap((channel) => {
+          const skill = skillFor(channel.id);
+          return skill ? [[channel.id, skill.id]] : [];
+        }),
+      ),
       topicTitle: topicTitle.value.trim(),
       topicDescription: topicDescription.value.trim(),
     });
@@ -197,6 +230,17 @@ async function generate() {
     generating.value = false;
   }
 }
+
+function openImageSettings() {
+  settingsSection.value = "images";
+  emit("openSettings");
+}
+
+const coverImagesLabel = computed(() => {
+  if (step.value <= 2) return "Picked later";
+  if (!withImages.value) return "No";
+  return imageMode.value === "generate" ? "Yes · drawn by API" : "Yes · prompts only";
+});
 
 async function stop() {
   stopping.value = true;
@@ -453,6 +497,43 @@ async function allowAndRetry() {
               </div>
             </SectionCard>
 
+            <SectionCard v-if="withImages" icon="sparkles" title="How to make the images" hint="Draw them now, or get a prompt to use in any image tool.">
+              <div class="pw-choices">
+                <button
+                  type="button"
+                  class="pw-choice"
+                  :class="{ selected: imageMode === 'generate' }"
+                  :aria-pressed="imageMode === 'generate'"
+                  :disabled="generating"
+                  @click="imageMode = 'generate'"
+                >
+                  <span class="pw-choice-icon"><Icon name="sparkles" :size="16" /></span>
+                  <b>Generate with the image API</b>
+                  <span v-if="imageApi?.configured">Each idea gets a cover image drawn by {{ imageApi.model }} after planning.</span>
+                  <span v-else>Needs an API key in Settings &gt; Image API.</span>
+                </button>
+                <button
+                  type="button"
+                  class="pw-choice"
+                  :class="{ selected: imageMode === 'prompt' }"
+                  :aria-pressed="imageMode === 'prompt'"
+                  :disabled="generating"
+                  @click="imageMode = 'prompt'"
+                >
+                  <span class="pw-choice-icon"><Icon name="penLine" :size="16" /></span>
+                  <b>Write image prompts only</b>
+                  <span>Copy each idea's prompt on its Write post page, make the image anywhere, then upload it.</span>
+                </button>
+              </div>
+              <div v-if="imageMode === 'generate' && !imageApi?.configured" class="wp-alert wp-alert-info pw-image-setup" role="status">
+                <Icon name="alertCircle" :size="16" />
+                <span>
+                  No image API key yet.
+                  <button type="button" class="wp-link" @click="openImageSettings">Add one in Settings</button>
+                </span>
+              </div>
+            </SectionCard>
+
             <!-- Live activity: what the agent is doing right now -->
             <SectionCard
               v-if="generating || activity.length"
@@ -509,6 +590,31 @@ async function allowAndRetry() {
       <!-- Live summary of the plan, like the composer's live preview -->
       <aside class="wp-preview pw-summary" aria-label="Plan summary">
         <div class="wp-preview-head">
+          <span class="wp-preview-label"><Icon name="fileText" :size="14" /> Idea skill per channel</span>
+        </div>
+        <div class="pw-skills">
+          <p v-if="!activeChannels.length" class="pw-summary-empty">Add posts to a channel to pick its skill.</p>
+          <label v-for="channel in activeChannels" :key="channel.id" class="pw-skill-row">
+            <span class="pw-skill-channel">
+              <PlatformIcon :platform="channel.platform" size="sm" />
+              <span>{{ channel.name }}</span>
+            </span>
+            <select
+              class="sk-select"
+              :value="skillFor(channel.id)?.id ?? ''"
+              :disabled="generating || !skills.length"
+              :aria-label="`Idea skill for ${channel.name}`"
+              @change="channelSkillIds[channel.id] = ($event.target as HTMLSelectElement).value"
+            >
+              <option v-for="skill in skills" :key="skill.id" :value="skill.id">
+                {{ skill.name }}{{ skill.isDefault ? " (default)" : "" }}
+              </option>
+            </select>
+          </label>
+          <p class="pw-skills-note">Defaults come from Settings &gt; Idea skills.</p>
+        </div>
+
+        <div class="wp-preview-head">
           <span class="wp-preview-label"><Icon name="calendarClock" :size="14" /> Plan summary</span>
         </div>
         <div class="pw-summary-card">
@@ -551,7 +657,7 @@ async function allowAndRetry() {
             </div>
             <div>
               <dt>Cover images</dt>
-              <dd>{{ step > 2 ? (withImages ? "Yes" : "No") : "Picked later" }}</dd>
+              <dd>{{ coverImagesLabel }}</dd>
             </div>
           </dl>
         </div>

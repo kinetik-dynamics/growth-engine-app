@@ -65,6 +65,32 @@ pub struct Idea {
     /// When the idea's post was last sent to the main site's publish queue.
     #[serde(default)]
     pub published_at: Option<u64>,
+    /// File name of the cover image in the app's images folder, if any.
+    #[serde(default)]
+    pub image_file: Option<String>,
+    /// The idea skill the plan wrote this idea with.
+    #[serde(default)]
+    pub skill_name: Option<String>,
+}
+
+/// A named set of writing instructions sent to the AI agent with a plan.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Skill {
+    pub id: String,
+    pub name: String,
+    pub content: String,
+    pub is_default: bool,
+    pub created_at: u64,
+    pub updated_at: u64,
+}
+
+/// The skill picked by default for one of the planner's channels.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChannelSkill {
+    pub channel_id: String,
+    pub skill_id: String,
 }
 
 /// One channel a post goes out on, and when.
@@ -127,6 +153,8 @@ impl Idea {
             remote_id: None,
             publish_channels: Vec::new(),
             published_at: None,
+            image_file: None,
+            skill_name: None,
         }
     }
 }
@@ -191,15 +219,31 @@ CREATE TABLE IF NOT EXISTS agent_permissions (
     tool     TEXT NOT NULL,
     PRIMARY KEY (provider, tool)
 );
+CREATE TABLE IF NOT EXISTS skills (
+    id         TEXT PRIMARY KEY,
+    name       TEXT NOT NULL,
+    content    TEXT NOT NULL,
+    is_default INTEGER NOT NULL DEFAULT 0,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS channel_skills (
+    channel_id TEXT PRIMARY KEY,
+    skill_id   TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS settings (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 ";
 
 const IDEA_COLUMNS: &str = "id, title, short_notes, pain_addressed, target_keyword, pattern, tag, source, \
     channel_id, channel_name, scheduled_date, scheduled_time, offer_id, offer_name, suggested_draft, \
     image_prompt, status, provider, created_at, sent_at, remote_id, publish_channels, published_at, \
-    channel_platform, topic_title, topic_description";
+    channel_platform, topic_title, topic_description, image_file, skill_name";
 
 /// Columns added after the first release; `migrate` adds any that are missing.
-const ADDED_IDEA_COLUMNS: [(&str, &str); 7] = [
+const ADDED_IDEA_COLUMNS: [(&str, &str); 9] = [
     ("sent_at", "INTEGER"),
     ("remote_id", "INTEGER"),
     ("publish_channels", "TEXT NOT NULL DEFAULT '[]'"),
@@ -207,6 +251,8 @@ const ADDED_IDEA_COLUMNS: [(&str, &str); 7] = [
     ("channel_platform", "TEXT"),
     ("topic_title", "TEXT"),
     ("topic_description", "TEXT"),
+    ("image_file", "TEXT"),
+    ("skill_name", "TEXT"),
 ];
 
 /// Ideas planned before `channel_platform` existed still carry the
@@ -279,6 +325,8 @@ fn idea_from_row(row: &Row) -> rusqlite::Result<Idea> {
         channel_platform: row.get(23)?,
         topic_title: row.get(24)?,
         topic_description: row.get(25)?,
+        image_file: row.get(26)?,
+        skill_name: row.get(27)?,
     })
 }
 
@@ -351,7 +399,7 @@ pub fn insert_ideas(conn: &mut Connection, ideas: &[Idea]) -> Result<(), String>
         let mut statement = transaction
             .prepare(&format!(
                 "INSERT OR IGNORE INTO ideas ({IDEA_COLUMNS}) VALUES \
-                 (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26)"
+                 (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28)"
             ))
             .map_err(describe)?;
         for idea in ideas {
@@ -383,6 +431,8 @@ pub fn insert_ideas(conn: &mut Connection, ideas: &[Idea]) -> Result<(), String>
                     idea.channel_platform,
                     idea.topic_title,
                     idea.topic_description,
+                    idea.image_file,
+                    idea.skill_name,
                 ])
                 .map_err(describe)?;
         }
@@ -510,6 +560,167 @@ pub fn revoke_permission(conn: &Connection, provider: &str, tool: &str) -> Resul
         "DELETE FROM agent_permissions WHERE provider = ?1 AND tool = ?2",
         params![provider, tool],
     )
+    .map(|_| ())
+    .map_err(describe)
+}
+
+/// Points the idea at a new cover image file (or none) and returns the
+/// file it replaced, so the caller can delete it.
+pub fn set_idea_image(conn: &Connection, id: &str, file: Option<&str>) -> Result<(Idea, Option<String>), String> {
+    let previous = get_idea(conn, id)?.image_file;
+    conn.execute("UPDATE ideas SET image_file = ?2 WHERE id = ?1", params![id, file])
+        .map_err(describe)?;
+    Ok((get_idea(conn, id)?, previous))
+}
+
+/* Idea skills */
+
+const SKILL_COLUMNS: &str = "id, name, content, is_default, created_at, updated_at";
+
+fn skill_from_row(row: &Row) -> rusqlite::Result<Skill> {
+    Ok(Skill {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        content: row.get(2)?,
+        is_default: row.get::<_, i64>(3)? != 0,
+        created_at: row.get::<_, i64>(4)? as u64,
+        updated_at: row.get::<_, i64>(5)? as u64,
+    })
+}
+
+/// The default skill first, then by name.
+pub fn list_skills(conn: &Connection) -> Result<Vec<Skill>, String> {
+    let mut statement = conn
+        .prepare(&format!("SELECT {SKILL_COLUMNS} FROM skills ORDER BY is_default DESC, name COLLATE NOCASE, created_at"))
+        .map_err(describe)?;
+    let skills = statement
+        .query_map([], skill_from_row)
+        .map_err(describe)?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(describe)?;
+    Ok(skills)
+}
+
+pub fn get_skill(conn: &Connection, id: &str) -> Result<Skill, String> {
+    conn.query_row(&format!("SELECT {SKILL_COLUMNS} FROM skills WHERE id = ?1"), [id], skill_from_row)
+        .map_err(|error| match error {
+            rusqlite::Error::QueryReturnedNoRows => "This skill no longer exists.".to_string(),
+            other => describe(other),
+        })
+}
+
+/// The skill used when a channel has none picked.
+pub fn default_skill(conn: &Connection) -> Result<Skill, String> {
+    conn.query_row(
+        &format!("SELECT {SKILL_COLUMNS} FROM skills ORDER BY is_default DESC, created_at LIMIT 1"),
+        [],
+        skill_from_row,
+    )
+    .map_err(|error| match error {
+        rusqlite::Error::QueryReturnedNoRows => "There are no idea skills. Add one in Settings > Idea skills.".to_string(),
+        other => describe(other),
+    })
+}
+
+/// Creates the first skill from `content` when there are none yet.
+pub fn seed_skills(conn: &Connection, content: &str, now: u64) -> Result<(), String> {
+    let count: i64 = conn.query_row("SELECT COUNT(*) FROM skills", [], |row| row.get(0)).map_err(describe)?;
+    if count == 0 {
+        conn.execute(
+            "INSERT INTO skills (id, name, content, is_default, created_at, updated_at) VALUES (?1, ?2, ?3, 1, ?4, ?4)",
+            params![format!("skill-{now}"), "Content ideas", content, now as i64],
+        )
+        .map_err(describe)?;
+    }
+    Ok(())
+}
+
+pub fn create_skill(conn: &Connection, name: &str, content: &str, now: u64) -> Result<Skill, String> {
+    let id = format!("skill-{now}");
+    conn.execute(
+        "INSERT INTO skills (id, name, content, is_default, created_at, updated_at) VALUES (?1, ?2, ?3, 0, ?4, ?4)",
+        params![id, name, content, now as i64],
+    )
+    .map_err(describe)?;
+    get_skill(conn, &id)
+}
+
+pub fn update_skill(conn: &Connection, id: &str, name: &str, content: &str, now: u64) -> Result<Skill, String> {
+    let changed = conn
+        .execute(
+            "UPDATE skills SET name = ?2, content = ?3, updated_at = ?4 WHERE id = ?1",
+            params![id, name, content, now as i64],
+        )
+        .map_err(describe)?;
+    if changed == 0 {
+        return Err("This skill no longer exists.".into());
+    }
+    get_skill(conn, id)
+}
+
+/// Deletes a skill that is not the default. Channels that used it fall
+/// back to the default skill.
+pub fn delete_skill(conn: &Connection, id: &str) -> Result<(), String> {
+    if get_skill(conn, id)?.is_default {
+        return Err("The default skill can't be deleted. Make another skill the default first.".into());
+    }
+    conn.execute("DELETE FROM channel_skills WHERE skill_id = ?1", [id]).map_err(describe)?;
+    conn.execute("DELETE FROM skills WHERE id = ?1", [id]).map(|_| ()).map_err(describe)
+}
+
+pub fn set_default_skill(conn: &Connection, id: &str) -> Result<(), String> {
+    get_skill(conn, id)?;
+    conn.execute("UPDATE skills SET is_default = (id = ?1)", [id]).map(|_| ()).map_err(describe)
+}
+
+pub fn channel_skills(conn: &Connection) -> Result<Vec<ChannelSkill>, String> {
+    let mut statement = conn
+        .prepare("SELECT channel_id, skill_id FROM channel_skills WHERE skill_id IN (SELECT id FROM skills) ORDER BY channel_id")
+        .map_err(describe)?;
+    let rows = statement
+        .query_map([], |row| Ok(ChannelSkill { channel_id: row.get(0)?, skill_id: row.get(1)? }))
+        .map_err(describe)?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(describe)?;
+    Ok(rows)
+}
+
+/// Picks the channel's default skill; `None` makes it use the default skill.
+pub fn set_channel_skill(conn: &Connection, channel_id: &str, skill_id: Option<&str>) -> Result<(), String> {
+    match skill_id {
+        Some(skill_id) => {
+            get_skill(conn, skill_id)?;
+            conn.execute(
+                "INSERT INTO channel_skills (channel_id, skill_id) VALUES (?1, ?2) \
+                 ON CONFLICT(channel_id) DO UPDATE SET skill_id = excluded.skill_id",
+                params![channel_id, skill_id],
+            )
+        }
+        None => conn.execute("DELETE FROM channel_skills WHERE channel_id = ?1", [channel_id]),
+    }
+    .map(|_| ())
+    .map_err(describe)
+}
+
+/* App settings */
+
+pub fn get_setting(conn: &Connection, key: &str) -> Result<Option<String>, String> {
+    match conn.query_row("SELECT value FROM settings WHERE key = ?1", [key], |row| row.get(0)) {
+        Ok(value) => Ok(Some(value)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(other) => Err(describe(other)),
+    }
+}
+
+/// Saves the setting; `None` removes it.
+pub fn set_setting(conn: &Connection, key: &str, value: Option<&str>) -> Result<(), String> {
+    match value {
+        Some(value) => conn.execute(
+            "INSERT INTO settings (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![key, value],
+        ),
+        None => conn.execute("DELETE FROM settings WHERE key = ?1", [key]),
+    }
     .map(|_| ())
     .map_err(describe)
 }
@@ -774,6 +985,76 @@ mod tests {
 
         assert!(allowed_tools(&conn, "antigravity").unwrap().is_empty());
         assert_eq!(allowed_tools(&conn, "claude").unwrap(), ["Write"]);
+    }
+
+    #[test]
+    fn the_first_skill_is_seeded_once_as_the_default() {
+        let conn = memory_db();
+        seed_skills(&conn, "RULES", 1).unwrap();
+        seed_skills(&conn, "OTHER", 2).unwrap();
+
+        let skills = list_skills(&conn).unwrap();
+        assert_eq!(skills.len(), 1);
+        assert_eq!((skills[0].content.as_str(), skills[0].is_default), ("RULES", true));
+        assert_eq!(default_skill(&conn).unwrap(), skills[0]);
+    }
+
+    #[test]
+    fn skills_can_be_added_edited_made_default_and_deleted() {
+        let conn = memory_db();
+        seed_skills(&conn, "RULES", 1).unwrap();
+        let punchy = create_skill(&conn, "Punchy", "SHORT", 2).unwrap();
+
+        let edited = update_skill(&conn, &punchy.id, "Punchy X", "SHORTER", 3).unwrap();
+        assert_eq!((edited.name.as_str(), edited.content.as_str(), edited.updated_at), ("Punchy X", "SHORTER", 3));
+
+        set_default_skill(&conn, &punchy.id).unwrap();
+        assert_eq!(default_skill(&conn).unwrap().id, punchy.id);
+        assert_eq!(list_skills(&conn).unwrap().iter().filter(|skill| skill.is_default).count(), 1);
+        assert!(delete_skill(&conn, &punchy.id).unwrap_err().contains("default"));
+
+        let first = list_skills(&conn).unwrap().into_iter().find(|skill| !skill.is_default).unwrap();
+        delete_skill(&conn, &first.id).unwrap();
+        assert_eq!(list_skills(&conn).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn channel_skills_are_set_cleared_and_dropped_with_their_skill() {
+        let conn = memory_db();
+        seed_skills(&conn, "RULES", 1).unwrap();
+        let punchy = create_skill(&conn, "Punchy", "SHORT", 2).unwrap();
+
+        set_channel_skill(&conn, "x_profile", Some(&punchy.id)).unwrap();
+        set_channel_skill(&conn, "facebook_page", Some(&punchy.id)).unwrap();
+        set_channel_skill(&conn, "facebook_page", None).unwrap();
+        assert_eq!(channel_skills(&conn).unwrap(), [ChannelSkill { channel_id: "x_profile".into(), skill_id: punchy.id.clone() }]);
+        assert!(set_channel_skill(&conn, "x_profile", Some("missing")).is_err());
+
+        delete_skill(&conn, &punchy.id).unwrap();
+        assert!(channel_skills(&conn).unwrap().is_empty());
+    }
+
+    #[test]
+    fn settings_are_saved_replaced_and_removed() {
+        let conn = memory_db();
+        assert_eq!(get_setting(&conn, "image_api").unwrap(), None);
+        set_setting(&conn, "image_api", Some("a")).unwrap();
+        set_setting(&conn, "image_api", Some("b")).unwrap();
+        assert_eq!(get_setting(&conn, "image_api").unwrap().as_deref(), Some("b"));
+        set_setting(&conn, "image_api", None).unwrap();
+        assert_eq!(get_setting(&conn, "image_api").unwrap(), None);
+    }
+
+    #[test]
+    fn an_idea_image_can_be_set_and_reports_the_file_it_replaced() {
+        let mut conn = memory_db();
+        insert_ideas(&mut conn, &[planned("a", 1, None, "Sprint")]).unwrap();
+
+        let (idea, previous) = set_idea_image(&conn, "a", Some("a-1.png")).unwrap();
+        assert_eq!((idea.image_file.as_deref(), previous), (Some("a-1.png"), None));
+
+        let (idea, previous) = set_idea_image(&conn, "a", None).unwrap();
+        assert_eq!((idea.image_file, previous.as_deref()), (None, Some("a-1.png")));
     }
 
     #[test]

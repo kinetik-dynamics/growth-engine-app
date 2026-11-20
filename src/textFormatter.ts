@@ -44,13 +44,16 @@ export const toUnicodeBold = (text: string) => mapLetters(text, BOLD_CAPS_OFFSET
 export const toUnicodeItalic = (text: string) => mapLetters(text, ITALIC_CAPS_OFFSET, ITALIC_LOW_OFFSET);
 export const toUnicodeMonospace = (text: string) => mapLetters(text, MONO_CAPS_OFFSET, MONO_LOW_OFFSET, MONO_DIGIT_OFFSET);
 
-export function toUnicodeStrikethrough(text: string): string {
-  return text.split("").map((c) => (c === " " || c === "\n" ? c : c + "̶")).join("");
+/**
+ * Adds a combining mark after each character. Splits by code point, so
+ * emoji and already-bold letters (two UTF-16 units each) stay whole.
+ */
+function withMark(text: string, mark: string): string {
+  return Array.from(text).map((c) => (c === " " || c === "\n" || c === mark ? c : c + mark)).join("");
 }
 
-export function toUnicodeUnderline(text: string): string {
-  return text.split("").map((c) => (c === " " || c === "\n" ? c : c + "̲")).join("");
-}
+export const toUnicodeStrikethrough = (text: string) => withMark(text, "̶");
+export const toUnicodeUnderline = (text: string) => withMark(text, "̲");
 
 /** Strips Unicode styles, combining marks and Markdown back to plain text. */
 export function clearFormatting(text: string): string {

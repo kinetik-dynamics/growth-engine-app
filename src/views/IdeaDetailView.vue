@@ -51,6 +51,82 @@ const loadError = ref("");
 const confirmingDelete = ref(false);
 const current = ref<Idea>(props.idea);
 
+/* Cover image: saved right away, apart from the other edits */
+const coverImage = ref<string | null>(null);
+const imageBusy = ref<"" | "uploading" | "generating" | "removing">("");
+const imageError = ref("");
+const imageApiReady = ref(false);
+const promptCopied = ref(false);
+const fileInput = ref<HTMLInputElement | null>(null);
+const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
+
+async function loadCoverImage() {
+  coverImage.value = current.value.imageFile ? await api.ideaImage(current.value.id) : null;
+}
+
+function pickImage() {
+  imageError.value = "";
+  fileInput.value?.click();
+}
+
+function readAsDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result));
+    reader.onerror = () => reject("The image couldn't be read.");
+    reader.readAsDataURL(file);
+  });
+}
+
+async function imageAction(kind: "uploading" | "generating" | "removing", action: () => Promise<Idea>) {
+  imageError.value = "";
+  imageBusy.value = kind;
+  try {
+    current.value = await action();
+    emit("saved", current.value);
+    await loadCoverImage();
+  } catch (caught) {
+    imageError.value = errorMessage(caught);
+  } finally {
+    imageBusy.value = "";
+  }
+}
+
+async function onImagePicked(event: Event) {
+  const input = event.target as HTMLInputElement;
+  const file = input.files?.[0];
+  input.value = "";
+  if (!file) return;
+  if (!file.type.startsWith("image/")) {
+    imageError.value = "Pick a PNG, JPG, WebP or GIF image.";
+    return;
+  }
+  if (file.size > MAX_IMAGE_BYTES) {
+    imageError.value = "The image is larger than 8 MB. Pick a smaller one.";
+    return;
+  }
+  await imageAction("uploading", async () => api.setIdeaImage(current.value.id, await readAsDataUrl(file)));
+}
+
+/** The prompt is saved with the idea first, so the image and its prompt stay together. */
+const generateImage = () =>
+  imageAction("generating", async () => {
+    if (details.title.trim()) await persist();
+    return api.generateIdeaImage(current.value.id, details.imagePrompt.trim() || null);
+  });
+
+const removeImage = () => imageAction("removing", () => api.removeIdeaImage(current.value.id));
+
+async function copyPrompt() {
+  try {
+    await navigator.clipboard.writeText(details.imagePrompt);
+    promptCopied.value = true;
+    window.setTimeout(() => (promptCopied.value = false), 1500);
+  } catch {
+    imageError.value = "Couldn't copy. Select the prompt and copy it by hand.";
+  }
+}
+
 /** A slot the idea was planned for is the first suggestion, else tomorrow at 9. */
 function defaultSchedule(): Schedule {
   return { date: current.value.scheduledDate ?? localDateFromToday(1), time: current.value.scheduledTime ?? DEFAULT_POST_TIME };
@@ -78,6 +154,7 @@ const facts = computed(() =>
   [
     { label: "Source", value: current.value.source },
     { label: "Written by", value: current.value.provider },
+    { label: "Skill", value: current.value.skillName },
     { label: "Offer", value: current.value.offerName },
     {
       label: "Planned for",
@@ -173,7 +250,11 @@ async function load() {
   }
 }
 
-onMounted(load);
+onMounted(() => {
+  load();
+  loadCoverImage().catch((caught) => (imageError.value = errorMessage(caught)));
+  api.getImageApi().then((status) => (imageApiReady.value = status.configured)).catch(() => {});
+});
 
 function edit(): IdeaEdit {
   return {
@@ -360,10 +441,6 @@ function openConnections() {
                   <input v-model="details.tag" class="wp-input" />
                 </label>
               </div>
-              <label class="wp-field">
-                <span>Cover image brief (optional)</span>
-                <textarea v-model="details.imagePrompt" rows="2" class="wp-input"></textarea>
-              </label>
               <dl v-if="facts.length" class="wp-facts">
                 <div v-for="fact in facts" :key="fact.label">
                   <dt>{{ fact.label }}:</dt>
@@ -402,7 +479,14 @@ function openConnections() {
             <template #action>
               <span class="wp-chars">{{ text.length.toLocaleString() }} chars</span>
             </template>
-            <FormatToolbar v-model:text="text" v-model:format-mode="formatMode" :textarea="textarea" show-mode-switch />
+            <FormatToolbar
+              v-model:text="text"
+              v-model:format-mode="formatMode"
+              :textarea="textarea"
+              show-mode-switch
+              show-image
+              @image="pickImage"
+            />
             <textarea
               ref="textarea"
               v-model="text"
@@ -411,6 +495,76 @@ function openConnections() {
               placeholder="What do you want to share with your audience?"
               aria-label="Post"
             ></textarea>
+            <div v-if="coverImage" class="ci-attached">
+              <img :src="coverImage" alt="" />
+              <span>Cover image attached. It goes out with the post.</span>
+              <button type="button" class="wp-link" :disabled="imageBusy !== ''" @click="removeImage">Remove</button>
+            </div>
+          </SectionCard>
+
+          <SectionCard icon="image" title="Cover image" hint="Goes out with the post on every channel.">
+            <input
+              ref="fileInput"
+              type="file"
+              accept="image/png,image/jpeg,image/webp,image/gif"
+              class="ci-file"
+              tabindex="-1"
+              aria-hidden="true"
+              @change="onImagePicked"
+            />
+            <div class="ci">
+              <div v-if="coverImage" class="ci-preview" :class="{ busy: imageBusy !== '' }">
+                <img :src="coverImage" alt="Cover image" />
+              </div>
+              <button v-else type="button" class="ci-empty" :disabled="imageBusy !== ''" @click="pickImage">
+                <span v-if="imageBusy" class="spinner"></span>
+                <Icon v-else name="image" :size="28" />
+                <b>{{ imageBusy === "generating" ? "Drawing the image…" : imageBusy === "uploading" ? "Uploading…" : "No cover image yet" }}</b>
+                <span>Upload one, or generate it from the prompt below.</span>
+              </button>
+
+              <div class="ci-actions">
+                <button type="button" class="wp-btn" :disabled="imageBusy !== ''" @click="pickImage">
+                  <Icon name="upload" :size="14" /> {{ coverImage ? "Replace image" : "Upload image" }}
+                </button>
+                <button
+                  type="button"
+                  class="wp-btn"
+                  :disabled="imageBusy !== '' || !imageApiReady || !details.imagePrompt.trim()"
+                  :title="!imageApiReady ? 'Add an image API key in Settings > Image API first' : !details.imagePrompt.trim() ? 'Write an image prompt first' : 'Draw a new image from the prompt'"
+                  @click="generateImage"
+                >
+                  <span v-if="imageBusy === 'generating'" class="spinner" style="width: 13px; height: 13px; border-width: 1.5px"></span>
+                  <Icon v-else name="sparkles" :size="14" />
+                  {{ imageBusy === "generating" ? "Generating…" : coverImage ? "Regenerate" : "Generate" }}
+                </button>
+                <button v-if="coverImage" type="button" class="wp-btn wp-btn-danger-ghost" :disabled="imageBusy !== ''" @click="removeImage">
+                  <Icon name="trash" :size="14" /> Remove
+                </button>
+              </div>
+
+              <div v-if="imageError" class="wp-alert wp-alert-error" role="alert">
+                <Icon name="alertCircle" :size="16" /> <span>{{ imageError }}</span>
+              </div>
+
+              <label class="wp-field">
+                <span class="ci-prompt-label">
+                  Image prompt
+                  <button type="button" class="wp-link" :disabled="!details.imagePrompt.trim()" @click.prevent="copyPrompt">
+                    <Icon :name="promptCopied ? 'check' : 'copy'" :size="12" /> {{ promptCopied ? "Copied" : "Copy" }}
+                  </button>
+                </span>
+                <textarea
+                  v-model="details.imagePrompt"
+                  rows="3"
+                  class="wp-input"
+                  placeholder="Describe the cover image: subject, composition, style. Saved with the idea."
+                ></textarea>
+                <span v-if="!imageApiReady" class="wp-muted">
+                  No image API set up: copy the prompt, make the image in any tool, then upload it here.
+                </span>
+              </label>
+            </div>
           </SectionCard>
 
           <SectionCard icon="calendarClock" title="Schedule" hint="When each channel's post goes out. Used when you press Send to published.">
@@ -459,6 +613,7 @@ function openConnections() {
           <!-- formatPostPreviewHtml escapes the text before adding its own tags -->
           <div v-if="text.trim()" class="wp-preview-text" v-html="formatPostPreviewHtml(text)"></div>
           <div v-else class="wp-preview-empty">Your post will appear here as you type…</div>
+          <img v-if="coverImage" class="wp-preview-image" :src="coverImage" alt="Cover image" />
           <div class="wp-preview-foot">
             <span>Like · Comment · Repost</span>
             <span>{{ scheduleFor(previewChannel.id).date }} · {{ scheduleFor(previewChannel.id).time }}</span>

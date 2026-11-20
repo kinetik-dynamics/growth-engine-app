@@ -2,6 +2,7 @@
 
 use serde::Deserialize;
 use serde_json::Value;
+use std::collections::HashMap;
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -24,6 +25,20 @@ pub struct PlanRequest {
     pub topic_title: Option<String>,
     #[serde(default)]
     pub topic_description: Option<String>,
+    /// The idea skill picked for each planner channel id. Channels left
+    /// out use the default skill.
+    #[serde(default)]
+    pub channel_skills: HashMap<String, String>,
+    /// Draw each idea's cover image with the image API after planning,
+    /// instead of only writing the image brief.
+    #[serde(default)]
+    pub generate_images: bool,
+}
+
+/// A skill as it goes into the prompt.
+pub struct PlanSkill {
+    pub name: String,
+    pub content: String,
 }
 
 /// The plan's topic, if the user gave one.
@@ -54,8 +69,11 @@ pub struct Drafted {
     pub image_prompt: Option<String>,
 }
 
+/// `slot_skills[i]` is the index in `skills` of the skill slot `i` follows.
+#[allow(clippy::too_many_arguments)]
 pub fn build_prompt(
-    skill: &str,
+    skills: &[PlanSkill],
+    slot_skills: &[usize],
     company: &Value,
     offer: &Value,
     slots: &[Slot],
@@ -69,8 +87,19 @@ pub fn build_prompt(
          read files, or ask questions.\n\n",
     );
 
-    prompt.push_str("# Writing skill (follow strictly)\n\n");
-    prompt.push_str(skill.trim());
+    let several_skills = skills.len() > 1;
+    if several_skills {
+        prompt.push_str(
+            "# Writing skills (follow strictly)\n\nEach slot below names the skill its idea must follow. \
+             Apply only that skill's rules to that idea.",
+        );
+        for skill in skills {
+            prompt.push_str(&format!("\n\n## Skill: {}\n\n{}", skill.name.trim(), skill.content.trim()));
+        }
+    } else if let Some(skill) = skills.first() {
+        prompt.push_str("# Writing skill (follow strictly)\n\n");
+        prompt.push_str(skill.content.trim());
+    }
 
     prompt.push_str("\n\n# Company\n\n");
     prompt.push_str(&serde_json::to_string_pretty(company).unwrap_or_default());
@@ -91,7 +120,11 @@ pub fn build_prompt(
 
     prompt.push_str("\n\n# Slots to fill\n\nWrite exactly one idea per slot, in this order:\n");
     for (index, slot) in slots.iter().enumerate() {
-        prompt.push_str(&format!("{}. {} ({})\n", index + 1, slot.channel_name, slot.platform));
+        prompt.push_str(&format!("{}. {} ({})", index + 1, slot.channel_name, slot.platform));
+        if several_skills && let Some(skill) = slot_skills.get(index).and_then(|&i| skills.get(i)) {
+            prompt.push_str(&format!(" - skill: {}", skill.name.trim()));
+        }
+        prompt.push('\n');
     }
     prompt.push_str(
         "\nFit each idea to its platform: LinkedIn is long-form and opinionated, X is one sharp \
@@ -180,9 +213,11 @@ mod tests {
         }];
         let offer = serde_json::json!({ "name": "AI Automation Sprint" });
 
-        let text_only = build_prompt("SKILL", &Value::Null, &offer, &slots, None, false, &[]);
-        let with_images = build_prompt("SKILL", &Value::Null, &offer, &slots, None, true, &["Old idea".into()]);
+        let skills = one_skill();
+        let text_only = build_prompt(&skills, &[0], &Value::Null, &offer, &slots, None, false, &[]);
+        let with_images = build_prompt(&skills, &[0], &Value::Null, &offer, &slots, None, true, &["Old idea".into()]);
 
+        assert!(text_only.contains("# Writing skill (follow strictly)\n\nSKILL"));
         assert!(text_only.contains("1. X · account (X)\n"));
         assert!(text_only.contains("AI Automation Sprint"));
         assert!(!text_only.contains("image_prompt"));
@@ -200,13 +235,41 @@ mod tests {
             with_images: false,
             topic_title: Some(title.into()),
             topic_description: Some(description.into()),
+            channel_skills: HashMap::new(),
+            generate_images: false,
         };
         assert!(request("  ", "").topic().is_none());
 
         let focused = request(" Black Friday prep ", "Scaling stores for traffic spikes");
-        let prompt = build_prompt("SKILL", &Value::Null, &Value::Null, &[], focused.topic().as_ref(), false, &[]);
+        let prompt =
+            build_prompt(&one_skill(), &[], &Value::Null, &Value::Null, &[], focused.topic().as_ref(), false, &[]);
 
         assert!(prompt.contains("Title: Black Friday prep\n"));
         assert!(prompt.contains("Description: Scaling stores for traffic spikes\n"));
+    }
+
+    #[test]
+    fn several_skills_are_each_included_and_named_on_their_slots() {
+        let slot = |id: &str, name: &str, platform: &str| Slot {
+            channel_id: id.into(),
+            channel_name: name.into(),
+            platform: platform.into(),
+        };
+        let slots = vec![slot("linkedin_personal", "LinkedIn · Personal profile", "LinkedIn"), slot("x_profile", "X · account", "X")];
+        let skills = vec![
+            PlanSkill { name: "Long form".into(), content: "LONG RULES".into() },
+            PlanSkill { name: "Punchy".into(), content: "SHORT RULES".into() },
+        ];
+
+        let prompt = build_prompt(&skills, &[0, 1], &Value::Null, &Value::Null, &slots, None, false, &[]);
+
+        assert!(prompt.contains("## Skill: Long form\n\nLONG RULES"));
+        assert!(prompt.contains("## Skill: Punchy\n\nSHORT RULES"));
+        assert!(prompt.contains("1. LinkedIn · Personal profile (LinkedIn) - skill: Long form\n"));
+        assert!(prompt.contains("2. X · account (X) - skill: Punchy\n"));
+    }
+
+    fn one_skill() -> Vec<PlanSkill> {
+        vec![PlanSkill { name: "Default".into(), content: "SKILL".into() }]
     }
 }

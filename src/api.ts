@@ -96,6 +96,10 @@ export interface Idea {
   publishChannels: ChannelSchedule[];
   /** When the idea's post last joined the main site's publish queue (ms since epoch). */
   publishedAt: number | null;
+  /** The cover image's file in the app folder; load it with api.ideaImage. */
+  imageFile: string | null;
+  /** The idea skill the plan wrote this idea with. */
+  skillName: string | null;
 }
 
 export interface ChannelSchedule {
@@ -170,8 +174,37 @@ export interface PlanRequest {
   offerId: number;
   slots: PlanSlot[];
   withImages: boolean;
+  /** Draw the images with the image API, not only write their briefs. */
+  generateImages: boolean;
   topicTitle: string;
   topicDescription: string;
+  /** Planner channel id → idea skill id. Channels left out use the default skill. */
+  channelSkills: Record<string, string>;
+}
+
+/** A named set of writing instructions sent to the AI agent with a plan. */
+export interface Skill {
+  id: string;
+  name: string;
+  content: string;
+  isDefault: boolean;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface ChannelSkill {
+  channelId: string;
+  skillId: string;
+}
+
+export type ImageProvider = "gemini" | "openai";
+
+export interface ImageApiStatus {
+  provider: ImageProvider;
+  model: string;
+  configured: boolean;
+  /** The last characters of the saved key, e.g. "••••x9Qa". */
+  keyHint: string | null;
 }
 
 export interface OfferIdeaCount {
@@ -326,9 +359,23 @@ export const api = {
   sitePage: <K extends keyof SitePages>(page: K) => invoke<SitePages[K]>("site_page", { page }),
   detectClis: () => invoke<CliStatus[]>("detect_clis"),
   testCli: (provider: string) => invoke<string>("test_cli", { provider }),
-  getSkill: () => invoke<string>("get_skill"),
-  saveSkill: (content: string) => invoke<void>("save_skill", { content }),
-  resetSkill: () => invoke<string>("reset_skill"),
+  listSkills: () => invoke<Skill[]>("list_skills"),
+  createSkill: (name: string, content: string) => invoke<Skill>("create_skill", { name, content }),
+  updateSkill: (id: string, name: string, content: string) => invoke<Skill>("update_skill", { id, name, content }),
+  deleteSkill: (id: string) => invoke<void>("delete_skill", { id }),
+  setDefaultSkill: (id: string) => invoke<void>("set_default_skill", { id }),
+  skillTemplate: () => invoke<string>("skill_template"),
+  listChannelSkills: () => invoke<ChannelSkill[]>("list_channel_skills"),
+  setChannelSkill: (channelId: string, skillId: string | null) => invoke<void>("set_channel_skill", { channelId, skillId }),
+  getImageApi: () => invoke<ImageApiStatus>("get_image_api"),
+  saveImageApi: (provider: ImageProvider, model: string, apiKey: string | null) =>
+    invoke<ImageApiStatus>("save_image_api", { provider, model, apiKey }),
+  removeImageApi: () => invoke<ImageApiStatus>("remove_image_api"),
+  testImageApi: () => invoke<string>("test_image_api"),
+  ideaImage: (id: string) => invoke<string | null>("idea_image", { id }),
+  setIdeaImage: (id: string, dataUrl: string) => invoke<Idea>("set_idea_image", { id, dataUrl }),
+  removeIdeaImage: (id: string) => invoke<Idea>("remove_idea_image", { id }),
+  generateIdeaImage: (id: string, prompt: string | null) => invoke<Idea>("generate_idea_image", { id, prompt }),
   listIdeas: (tab: IdeaTab, page = 1) => invoke<IdeaPage>("list_ideas", { tab, page }),
   addIdea: (title: string) => invoke<Idea>("add_idea", { title }),
   deleteIdea: (id: string) => invoke<void>("delete_idea", { id }),

@@ -1,7 +1,8 @@
 //! Files the app keeps in the OS app-data directory: config.json (server
-//! URL + token), skill.md (the editable idea skill) and the SQLite database.
+//! URL + token), the SQLite database and the ideas' cover images. skill.md
+//! held the single idea skill of earlier versions; it seeds the first skill.
 
-use crate::db;
+use crate::{db, image};
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -81,23 +82,46 @@ pub fn clear_config(app: &AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-pub fn load_skill(app: &AppHandle) -> Result<String, String> {
-    let path = data_dir(app)?.join("skill.md");
+/// Gives a fresh install its first skill: the one edited in skill.md by
+/// earlier versions, else the built-in template.
+pub fn seed_skills(app: &AppHandle, now: u64) -> Result<(), String> {
+    let legacy = data_dir(app)?.join("skill.md");
+    let content = fs::read_to_string(&legacy)
+        .ok()
+        .filter(|content| !content.trim().is_empty())
+        .unwrap_or_else(|| DEFAULT_SKILL.to_string());
+    db::seed_skills(&database(app)?, &content, now)
+}
+
+/// Cover images live as files next to the database, named per idea.
+fn images_dir(app: &AppHandle) -> Result<PathBuf, String> {
+    let dir = data_dir(app)?.join("images");
+    fs::create_dir_all(&dir).map_err(|e| format!("Couldn't create {}: {e}", dir.display()))?;
+    Ok(dir)
+}
+
+/// Saves the picture for the idea and returns its file name.
+pub fn save_image(app: &AppHandle, idea_id: &str, picture: &image::Picture, now: u64) -> Result<String, String> {
+    let safe_id: String = idea_id.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-').collect();
+    let file = format!("{safe_id}-{now}.{}", picture.extension);
+    fs::write(images_dir(app)?.join(&file), &picture.bytes).map_err(|e| format!("Couldn't save the image: {e}"))?;
+    Ok(file)
+}
+
+/// The saved image as a data URL, or `None` when the file is gone.
+pub fn read_image(app: &AppHandle, file: &str) -> Result<Option<String>, String> {
+    let path = images_dir(app)?.join(file);
     if !path.exists() {
-        return Ok(DEFAULT_SKILL.to_string());
+        return Ok(None);
     }
-    fs::read_to_string(&path).map_err(|e| format!("Couldn't read skill.md: {e}"))
+    let bytes = fs::read(&path).map_err(|e| format!("Couldn't read the image: {e}"))?;
+    let extension = path.extension().and_then(|ext| ext.to_str()).unwrap_or("png");
+    Ok(Some(image::to_data_url(&bytes, extension)))
 }
 
-pub fn save_skill(app: &AppHandle, content: &str) -> Result<(), String> {
-    fs::write(data_dir(app)?.join("skill.md"), content)
-        .map_err(|e| format!("Couldn't save skill.md: {e}"))
-}
-
-pub fn reset_skill(app: &AppHandle) -> Result<String, String> {
-    let path = data_dir(app)?.join("skill.md");
-    if path.exists() {
-        fs::remove_file(&path).map_err(|e| format!("Couldn't reset skill.md: {e}"))?;
+/// Best effort: a leftover file only costs disk space.
+pub fn delete_image(app: &AppHandle, file: &str) {
+    if let Ok(dir) = images_dir(app) {
+        let _ = fs::remove_file(dir.join(file));
     }
-    Ok(DEFAULT_SKILL.to_string())
 }

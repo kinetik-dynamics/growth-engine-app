@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref } from "vue";
 import { getVersion } from "@tauri-apps/api/app";
-import { api, errorMessage, type CliStatus, type Permission, type Session } from "../api";
+import { api, errorMessage, type CliStatus, type ImageApiStatus, type Permission, type Session } from "../api";
 import {
   checkForUpdate,
   installUpdate,
@@ -12,14 +12,23 @@ import {
   updateProgress,
 } from "../updater";
 import Icon from "../components/Icon.vue";
+import SkillsPanel from "../components/SkillsPanel.vue";
+import ImageApiPanel from "../components/ImageApiPanel.vue";
 import type { IconName } from "../icons";
+import { settingsSection, type SettingsSection } from "../settingsNav";
 
-type Tab = "agents" | "skill" | "updates";
+type Tab = SettingsSection;
 
 defineProps<{ session: Session }>();
 
-const tab = ref<Tab>(updateAvailable.value ? "updates" : "agents");
+const tab = ref<Tab>(settingsSection.value ?? (updateAvailable.value ? "updates" : "skills"));
+settingsSection.value = null;
 const appVersion = ref("");
+
+/* Idea skills and image API: their panels report back for the side panel */
+const skillCount = ref<number | null>(null);
+const skillDirty = ref(false);
+const imageApi = ref<ImageApiStatus | null>(null);
 
 /* AI agents */
 const clis = ref<CliStatus[] | null>(null);
@@ -72,58 +81,19 @@ async function revoke(permission: Permission) {
   }
 }
 
-/* Idea skill */
-const skill = ref("");
-const savedSkill = ref("");
-const skillLoaded = ref(false);
-const skillError = ref("");
-const skillNotice = ref("");
-const saving = ref(false);
-const confirmingReset = ref(false);
-const dirty = computed(() => skill.value !== savedSkill.value);
-const skillStats = computed(() => {
-  const text = skill.value;
-  const words = text.trim() ? text.trim().split(/\s+/).length : 0;
-  return `${text.split("\n").length} lines · ${words} words`;
-});
-
-async function loadSkill() {
-  try {
-    skill.value = savedSkill.value = await api.getSkill();
-  } catch (caught) {
-    skillError.value = errorMessage(caught);
-  } finally {
-    skillLoaded.value = true;
-  }
-}
-
-async function saveSkill() {
-  skillError.value = skillNotice.value = "";
-  saving.value = true;
-  try {
-    await api.saveSkill(skill.value);
-    savedSkill.value = skill.value;
-    skillNotice.value = "Skill saved. The next plan uses it.";
-  } catch (caught) {
-    skillError.value = errorMessage(caught);
-  } finally {
-    saving.value = false;
-  }
-}
-
-async function resetSkill() {
-  skillError.value = skillNotice.value = "";
-  confirmingReset.value = false;
-  try {
-    skill.value = savedSkill.value = await api.resetSkill();
-    skillNotice.value = "Skill reset to the default.";
-  } catch (caught) {
-    skillError.value = errorMessage(caught);
-  }
-}
-
 /* Side navigation */
 const NAV = computed<{ id: Tab; label: string; icon: IconName; sub: string; dot?: "ok" | "warn" | "info" }[]>(() => [
+  {
+    id: "skills",
+    label: "Idea skills",
+    icon: "fileText",
+    sub: skillDirty.value
+      ? "Unsaved changes"
+      : skillCount.value === null
+        ? "Instructions for plans"
+        : `${skillCount.value} ${skillCount.value === 1 ? "skill" : "skills"}`,
+    dot: skillDirty.value ? "warn" : undefined,
+  },
   {
     id: "agents",
     label: "AI agents",
@@ -132,11 +102,11 @@ const NAV = computed<{ id: Tab; label: string; icon: IconName; sub: string; dot?
     dot: clis.value ? (connectedCount.value ? "ok" : "warn") : undefined,
   },
   {
-    id: "skill",
-    label: "Idea skill",
-    icon: "fileText",
-    sub: dirty.value ? "Unsaved changes" : "Instructions for plans",
-    dot: dirty.value ? "warn" : undefined,
+    id: "images",
+    label: "Image API",
+    icon: "sparkles",
+    sub: !imageApi.value ? "Cover images" : imageApi.value.configured ? imageApi.value.model : "Not set",
+    dot: imageApi.value?.configured ? "ok" : undefined,
   },
   {
     id: "updates",
@@ -150,7 +120,8 @@ const NAV = computed<{ id: Tab; label: string; icon: IconName; sub: string; dot?
 onMounted(async () => {
   scan();
   loadPermissions();
-  loadSkill();
+  api.getImageApi().then((status) => (imageApi.value = status)).catch(() => {});
+  api.listSkills().then((skills) => (skillCount.value = skills.length)).catch(() => {});
   try {
     appVersion.value = await getVersion();
   } catch {
@@ -200,6 +171,17 @@ onMounted(async () => {
       </aside>
 
       <main class="pub-main">
+        <!-- Idea skills: kept mounted so an open edit survives switching sections -->
+        <SkillsPanel
+          v-show="tab === 'skills'"
+          :website-url="session.websiteUrl"
+          @dirty="skillDirty = $event"
+          @count="skillCount = $event"
+        />
+
+        <!-- Image API -->
+        <ImageApiPanel v-if="tab === 'images'" @status="imageApi = $event" />
+
         <!-- AI agents -->
         <div v-if="tab === 'agents'" class="pub-section">
           <div class="pub-section-head st-section-head">
@@ -275,43 +257,8 @@ onMounted(async () => {
           </div>
         </div>
 
-        <!-- Idea skill -->
-        <div v-else-if="tab === 'skill'" class="pub-section">
-          <div class="pub-section-head st-section-head">
-            <div>
-              <h2>Idea skill</h2>
-              <p>These instructions are sent to the AI agent with every plan. Edit them to change how ideas are written.</p>
-            </div>
-          </div>
-
-          <div class="st-editor">
-            <div class="st-editor-bar">
-              <label for="skill">SKILL.md</label>
-              <span v-if="skillLoaded">{{ skillStats }}<template v-if="dirty"> · <b>Unsaved</b></template></span>
-            </div>
-            <div v-if="!skillLoaded" class="skeleton" style="height: 420px; border-radius: 0"></div>
-            <textarea v-else id="skill" v-model="skill" class="st-textarea" rows="24" spellcheck="false" @input="skillNotice = ''"></textarea>
-          </div>
-
-          <div v-if="skillError" class="alert alert-error" role="alert">{{ skillError }}</div>
-          <div v-if="skillNotice" class="alert alert-success" role="status">{{ skillNotice }}</div>
-
-          <div class="st-actions">
-            <div v-if="confirmingReset" class="st-confirm">
-              <span>Replace your skill with the default? Your edits will be lost.</span>
-              <button class="btn btn-sm btn-danger-solid" @click="resetSkill">Reset skill</button>
-              <button class="btn btn-sm" @click="confirmingReset = false">Keep my skill</button>
-            </div>
-            <button v-else class="st-btn" @click="confirmingReset = true"><Icon name="rotateCcw" :size="14" /> Reset to default</button>
-            <button class="btn btn-primary" :disabled="saving || !skillLoaded || !dirty" @click="saveSkill">
-              <span v-if="saving" class="spinner"></span>
-              {{ saving ? "Saving…" : dirty ? "Save skill" : "Saved" }}
-            </button>
-          </div>
-        </div>
-
         <!-- Updates -->
-        <div v-else class="pub-section st-narrow">
+        <div v-else-if="tab === 'updates'" class="pub-section st-narrow">
           <div class="pub-section-head st-section-head">
             <div>
               <h2>App updates</h2>

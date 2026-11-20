@@ -5,10 +5,23 @@ import type { IconName } from "../icons";
 import Icon from "./Icon.vue";
 
 const props = withDefaults(
-  defineProps<{ textarea: HTMLTextAreaElement | null; text: string; formatMode?: FormatMode; showModeSwitch?: boolean; disabled?: boolean }>(),
-  { formatMode: "unicode", showModeSwitch: false, disabled: false },
+  defineProps<{
+    textarea: HTMLTextAreaElement | null;
+    text: string;
+    formatMode?: FormatMode;
+    showModeSwitch?: boolean;
+    disabled?: boolean;
+    /** Shows an "Add image" button that emits `image`. */
+    showImage?: boolean;
+  }>(),
+  { formatMode: "unicode", showModeSwitch: false, disabled: false, showImage: false },
 );
-const emit = defineEmits<{ "update:text": [text: string]; "update:formatMode": [mode: FormatMode] }>();
+const emit = defineEmits<{ "update:text": [text: string]; "update:formatMode": [mode: FormatMode]; image: [] }>();
+
+/** Markdown has no underline, so that button only works in Unicode mode. */
+function unavailable(action: FormatAction) {
+  return action === "underline" && props.formatMode === "markdown";
+}
 
 const EMOJI_GROUPS = [
   { name: "Tech & Work", emojis: ["🚀", "⚡", "💡", "🛠️", "💻", "📱", "⚙️", "🤖", "📈", "📊"] },
@@ -93,9 +106,9 @@ function insert(value: string) {
         :key="button.action"
         type="button"
         class="ft-btn"
-        :title="button.title"
+        :title="unavailable(button.action) ? 'Underline needs Unicode mode (Markdown has no underline)' : button.title"
         :aria-label="button.title"
-        :disabled="disabled"
+        :disabled="disabled || unavailable(button.action)"
         @click="apply(button.action)"
       >
         <Icon :name="button.icon" :size="14" :stroke="2" />
@@ -114,6 +127,12 @@ function insert(value: string) {
         <Icon :name="button.icon" :size="14" :stroke="2" />
       </button>
       <span class="ft-sep"></span>
+      <template v-if="showImage">
+        <button type="button" class="ft-btn" title="Add a cover image" aria-label="Add image" :disabled="disabled" @click="emit('image')">
+          <Icon name="image" :size="14" :stroke="2" />
+        </button>
+        <span class="ft-sep"></span>
+      </template>
 
       <div class="ft-menu" :class="{ 'ft-menu-open': open === 'case' }">
         <button type="button" class="ft-btn ft-btn-text" title="Text case transformation" :disabled="disabled" @click="toggle('case')">

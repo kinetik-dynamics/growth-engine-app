@@ -1,6 +1,7 @@
 mod api;
 mod cli;
 mod db;
+mod image;
 mod plan;
 mod store;
 
@@ -174,22 +175,187 @@ fn revoke_permission(app: AppHandle, provider: String, tool: String) -> Result<(
     db::revoke_permission(&store::database(&app)?, &provider, &tool)
 }
 
-#[tauri::command]
-fn get_skill(app: AppHandle) -> Result<String, String> {
-    store::load_skill(&app)
-}
+/* Idea skills */
 
-#[tauri::command]
-fn save_skill(app: AppHandle, content: String) -> Result<(), String> {
-    if content.trim().is_empty() {
-        return Err("The skill can't be empty. Use \"Reset to default\" to restore the original.".into());
+const SKILL_NAME_MAX: usize = 80;
+
+/// Trims the name and content of a skill being saved, and checks both.
+fn checked_skill(name: &str, content: &str) -> Result<(String, String), String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("Give the skill a name.".into());
     }
-    store::save_skill(&app, &content)
+    if name.chars().count() > SKILL_NAME_MAX {
+        return Err(format!("Keep the skill name under {SKILL_NAME_MAX} characters."));
+    }
+    if content.trim().is_empty() {
+        return Err("Write the skill's instructions first.".into());
+    }
+    Ok((name.to_string(), content.to_string()))
 }
 
 #[tauri::command]
-fn reset_skill(app: AppHandle) -> Result<String, String> {
-    store::reset_skill(&app)
+fn list_skills(app: AppHandle) -> Result<Vec<db::Skill>, String> {
+    db::list_skills(&store::database(&app)?)
+}
+
+#[tauri::command]
+fn create_skill(app: AppHandle, name: String, content: String) -> Result<db::Skill, String> {
+    let (name, content) = checked_skill(&name, &content)?;
+    db::create_skill(&store::database(&app)?, &name, &content, now_ms())
+}
+
+#[tauri::command]
+fn update_skill(app: AppHandle, id: String, name: String, content: String) -> Result<db::Skill, String> {
+    let (name, content) = checked_skill(&name, &content)?;
+    db::update_skill(&store::database(&app)?, &id, &name, &content, now_ms())
+}
+
+#[tauri::command]
+fn delete_skill(app: AppHandle, id: String) -> Result<(), String> {
+    db::delete_skill(&store::database(&app)?, &id)
+}
+
+#[tauri::command]
+fn set_default_skill(app: AppHandle, id: String) -> Result<(), String> {
+    db::set_default_skill(&store::database(&app)?, &id)
+}
+
+/// The built-in skill text, for starting a new skill from a template.
+#[tauri::command]
+fn skill_template() -> String {
+    store::DEFAULT_SKILL.to_string()
+}
+
+#[tauri::command]
+fn list_channel_skills(app: AppHandle) -> Result<Vec<db::ChannelSkill>, String> {
+    db::channel_skills(&store::database(&app)?)
+}
+
+#[tauri::command]
+fn set_channel_skill(app: AppHandle, channel_id: String, skill_id: Option<String>) -> Result<(), String> {
+    db::set_channel_skill(&store::database(&app)?, &channel_id, skill_id.as_deref())
+}
+
+/* Image API */
+
+const IMAGE_API_SETTING: &str = "image_api";
+
+fn image_api(app: &AppHandle) -> Result<Option<image::ImageApi>, String> {
+    let raw = db::get_setting(&store::database(app)?, IMAGE_API_SETTING)?;
+    Ok(raw
+        .and_then(|raw| serde_json::from_str::<image::ImageApi>(&raw).ok())
+        .filter(|api| !api.api_key.trim().is_empty()))
+}
+
+/// What Settings shows about the image API. The key itself never leaves
+/// the backend; only its last characters are shown.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ImageApiStatus {
+    provider: String,
+    model: String,
+    configured: bool,
+    key_hint: Option<String>,
+}
+
+#[tauri::command]
+fn get_image_api(app: AppHandle) -> Result<ImageApiStatus, String> {
+    Ok(match image_api(&app)? {
+        Some(api) => {
+            let key: Vec<char> = api.api_key.trim().chars().collect();
+            let tail: String = key[key.len().saturating_sub(4)..].iter().collect();
+            ImageApiStatus { provider: api.provider, model: api.model, configured: true, key_hint: Some(format!("••••{tail}")) }
+        }
+        None => ImageApiStatus {
+            provider: "gemini".into(),
+            model: image::default_model("gemini").into(),
+            configured: false,
+            key_hint: None,
+        },
+    })
+}
+
+/// Saves the image API. A blank key keeps the saved one.
+#[tauri::command]
+fn save_image_api(app: AppHandle, provider: String, model: String, api_key: Option<String>) -> Result<ImageApiStatus, String> {
+    if !image::is_provider(&provider) {
+        return Err("Pick Google Gemini or OpenAI.".into());
+    }
+    let api_key = match api_key.map(|key| key.trim().to_string()).filter(|key| !key.is_empty()) {
+        Some(key) => key,
+        None => image_api(&app)?
+            .map(|api| api.api_key)
+            .ok_or("Paste the API key first.")?,
+    };
+    let model = match model.trim() {
+        "" => image::default_model(&provider).to_string(),
+        model => model.to_string(),
+    };
+    let saved = serde_json::to_string(&image::ImageApi { provider, model, api_key }).map_err(|e| e.to_string())?;
+    db::set_setting(&store::database(&app)?, IMAGE_API_SETTING, Some(&saved))?;
+    get_image_api(app)
+}
+
+#[tauri::command]
+fn remove_image_api(app: AppHandle) -> Result<ImageApiStatus, String> {
+    db::set_setting(&store::database(&app)?, IMAGE_API_SETTING, None)?;
+    get_image_api(app)
+}
+
+/// Draws one test image so the user knows the key and model work.
+#[tauri::command]
+async fn test_image_api(app: AppHandle) -> Result<String, String> {
+    let api = image_api(&app)?.ok_or("Save an API key first.")?;
+    let picture = image::generate(&api, "A small potted plant on a clean desk, soft daylight.").await?;
+    Ok(image::to_data_url(&picture.bytes, picture.extension))
+}
+
+/* Cover images of ideas */
+
+/// Points the idea at a new image file and removes the one it replaced.
+fn attach_image(app: &AppHandle, id: &str, picture: Option<&image::Picture>) -> Result<Idea, String> {
+    let file = picture.map(|picture| store::save_image(app, id, picture, now_ms())).transpose()?;
+    let (idea, previous) = db::set_idea_image(&store::database(app)?, id, file.as_deref())?;
+    if let Some(previous) = previous.filter(|previous| Some(previous) != file.as_ref()) {
+        store::delete_image(app, &previous);
+    }
+    Ok(idea)
+}
+
+/// The idea's cover image as a data URL, if it has one.
+#[tauri::command]
+fn idea_image(app: AppHandle, id: String) -> Result<Option<String>, String> {
+    match db::get_idea(&store::database(&app)?, &id)?.image_file {
+        Some(file) => store::read_image(&app, &file),
+        None => Ok(None),
+    }
+}
+
+/// Saves an image the user picked as the idea's cover image.
+#[tauri::command]
+fn set_idea_image(app: AppHandle, id: String, data_url: String) -> Result<Idea, String> {
+    let picture = image::from_data_url(&data_url)?;
+    attach_image(&app, &id, Some(&picture))
+}
+
+#[tauri::command]
+fn remove_idea_image(app: AppHandle, id: String) -> Result<Idea, String> {
+    attach_image(&app, &id, None)
+}
+
+/// Draws the idea's cover image from `prompt` (its saved brief when blank).
+#[tauri::command]
+async fn generate_idea_image(app: AppHandle, id: String, prompt: Option<String>) -> Result<Idea, String> {
+    let api = image_api(&app)?.ok_or("Add an image API key in Settings > Image API first.")?;
+    let idea = db::get_idea(&store::database(&app)?, &id)?;
+    let prompt = prompt
+        .filter(|prompt| !prompt.trim().is_empty())
+        .or(idea.image_prompt)
+        .filter(|prompt| !prompt.trim().is_empty())
+        .ok_or("Write a cover image brief first.")?;
+    let picture = image::generate(&api, &prompt).await?;
+    attach_image(&app, &id, Some(&picture))
 }
 
 #[tauri::command]
@@ -236,8 +402,14 @@ async fn send_idea(app: AppHandle, id: String) -> Result<Idea, String> {
 async fn upload_idea(app: &AppHandle, config: &Config, id: &str) -> Result<Idea, String> {
     let idea = db::get_idea(&store::database(app)?, id)?;
     let blank = |value: &str| if value.trim().is_empty() { None } else { Some(value.to_string()) };
+    // The app owns the cover image: sending without one removes it there too.
+    let image = match &idea.image_file {
+        Some(file) => store::read_image(app, file)?,
+        None => None,
+    };
 
     let body = serde_json::json!({
+        "image": image,
         "external_id": idea.id,
         "offer_id": idea.offer_id,
         "title": idea.title,
@@ -394,14 +566,22 @@ async fn generate_plan(app: AppHandle, request: plan::PlanRequest) -> Result<Pla
     let company = api::get(base_url, &config.token, "/api/me").await?["company"].clone();
     let offer_name = text(&offer["name"]);
 
-    let skill = store::load_skill(&app)?;
-    let (existing_titles, allowed_tools) = {
-        let conn = store::database(&app)?;
-        (db::recent_idea_titles(&conn, 40)?, db::allowed_tools(&conn, &request.provider)?)
+    let image_api = if request.with_images && request.generate_images {
+        Some(image_api(&app)?.ok_or("Add an image API key in Settings > Image API, or pick \"Write image prompts only\".")?)
+    } else {
+        None
     };
+
+    let (existing_titles, allowed_tools, skills, slot_skills) = {
+        let conn = store::database(&app)?;
+        let (skills, slot_skills) = plan_skills(&conn, &request)?;
+        (db::recent_idea_titles(&conn, 40)?, db::allowed_tools(&conn, &request.provider)?, skills, slot_skills)
+    };
+    let skill_names: Vec<String> = skills.iter().map(|skill| skill.name.clone()).collect();
     let topic = request.topic();
     let prompt = plan::build_prompt(
-        &skill,
+        &skills,
+        &slot_skills,
         &company,
         &offer,
         &request.slots,
@@ -417,8 +597,9 @@ async fn generate_plan(app: AppHandle, request: plan::PlanRequest) -> Result<Pla
         &app,
         "stage",
         format!(
-            "Built the brief: offer \"{}\", your idea skill, {} slots ({} characters)",
+            "Built the brief: offer \"{}\", skills {}, {} slots ({} characters)",
             offer_name.as_deref().unwrap_or("?"),
+            skill_names.iter().map(|name| format!("\"{name}\"")).collect::<Vec<_>>().join(", "),
             request.slots.len(),
             prompt.chars().count()
         ),
@@ -475,13 +656,77 @@ async fn generate_plan(app: AppHandle, request: plan::PlanRequest) -> Result<Pla
             suggested_draft: idea.draft,
             image_prompt: if request.with_images { idea.image_prompt } else { None },
             provider: Some(request.provider.clone()),
+            skill_name: slot_skills.get(index).and_then(|&i| skill_names.get(i)).cloned(),
             ..Idea::manual(idea.title.trim().to_string(), created_at)
         })
         .collect();
 
     db::insert_ideas(&mut store::database(&app)?, &ideas)?;
     report(&app, "stage", format!("Saved {} ideas", ideas.len()));
+
+    let ideas = match image_api {
+        Some(api) => draw_cover_images(&app, &api, ideas).await,
+        None => ideas,
+    };
     Ok(PlanOutcome::Created { ideas })
+}
+
+/// The distinct skills a plan uses, and for each slot the index of its
+/// skill: the one picked for the slot's channel, else the default skill.
+fn plan_skills(conn: &rusqlite::Connection, request: &plan::PlanRequest) -> Result<(Vec<plan::PlanSkill>, Vec<usize>), String> {
+    let default = db::default_skill(conn)?;
+    let mut picked: Vec<db::Skill> = Vec::new();
+    let mut slot_skills = Vec::with_capacity(request.slots.len());
+    for slot in &request.slots {
+        let skill = match request.channel_skills.get(&slot.channel_id) {
+            // A skill deleted since the page loaded falls back to the default.
+            Some(id) => db::get_skill(conn, id).unwrap_or_else(|_| default.clone()),
+            None => default.clone(),
+        };
+        let index = match picked.iter().position(|known| known.id == skill.id) {
+            Some(index) => index,
+            None => {
+                picked.push(skill);
+                picked.len() - 1
+            }
+        };
+        slot_skills.push(index);
+    }
+    let skills = picked.into_iter().map(|skill| plan::PlanSkill { name: skill.name, content: skill.content }).collect();
+    Ok((skills, slot_skills))
+}
+
+/// Draws a cover image for every new idea that has a brief. A failed
+/// image is reported and skipped; the idea keeps its brief.
+async fn draw_cover_images(app: &AppHandle, api: &image::ImageApi, ideas: Vec<Idea>) -> Vec<Idea> {
+    let total = ideas.iter().filter(|idea| idea.image_prompt.is_some()).count();
+    let mut drawn = Vec::with_capacity(ideas.len());
+    let mut done = 0;
+    for idea in ideas {
+        let Some(prompt) = idea.image_prompt.clone().filter(|prompt| !prompt.trim().is_empty()) else {
+            drawn.push(idea);
+            continue;
+        };
+        if CANCEL_PLAN.load(Ordering::Relaxed) {
+            report(app, "denied", "Stopped before all images were drawn. Generate the rest from each idea's page.");
+            drawn.push(idea);
+            continue;
+        }
+        done += 1;
+        report(app, "stage", format!("Drawing cover image {done} of {total}: \"{}\"", idea.title));
+        let result = match image::generate(api, &prompt).await {
+            Ok(picture) => attach_image(app, &idea.id, Some(&picture)),
+            Err(error) => Err(error),
+        };
+        match result {
+            Ok(with_image) => drawn.push(with_image),
+            Err(error) => {
+                report(app, "denied", format!("No image for \"{}\": {error}", idea.title));
+                drawn.push(idea);
+            }
+        }
+    }
+    drawn
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -492,6 +737,9 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .setup(|app| {
             if let Err(error) = store::import_legacy_ideas(app.handle()) {
+                eprintln!("{error}");
+            }
+            if let Err(error) = store::seed_skills(app.handle(), now_ms()) {
                 eprintln!("{error}");
             }
             Ok(())
@@ -508,9 +756,22 @@ pub fn run() {
             list_permissions,
             grant_permissions,
             revoke_permission,
-            get_skill,
-            save_skill,
-            reset_skill,
+            list_skills,
+            create_skill,
+            update_skill,
+            delete_skill,
+            set_default_skill,
+            skill_template,
+            list_channel_skills,
+            set_channel_skill,
+            get_image_api,
+            save_image_api,
+            remove_image_api,
+            test_image_api,
+            idea_image,
+            set_idea_image,
+            remove_idea_image,
+            generate_idea_image,
             list_ideas,
             add_idea,
             delete_idea,

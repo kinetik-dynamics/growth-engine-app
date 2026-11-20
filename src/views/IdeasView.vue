@@ -276,6 +276,7 @@ function actionLabel(idea: Idea) {
                   <Icon name="send" :size="12" /> Sent
                 </span>
                 <span v-if="idea.sentAt && !idea.publishedAt" class="iv-badge iv-badge-web" title="This idea is on the website's Ideas page">On website</span>
+                <span v-if="idea.imageFile" class="iv-tag iv-tag-image" title="Has a cover image"><Icon name="image" :size="11" /></span>
                 <span v-if="idea.tag" class="iv-tag">{{ idea.tag }}</span>
               </div>
             </div>
