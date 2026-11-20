@@ -1,19 +1,37 @@
 <script setup lang="ts">
-import { onMounted, ref } from "vue";
+import { onMounted, ref, watch } from "vue";
 import { getVersion } from "@tauri-apps/api/app";
 import { api, errorMessage, type Session } from "./api";
 import LoginView from "./views/LoginView.vue";
 import OffersView from "./views/OffersView.vue";
 import IdeasView from "./views/IdeasView.vue";
 import SettingsView from "./views/SettingsView.vue";
+import OverviewView from "./views/OverviewView.vue";
+import IcpsView from "./views/IcpsView.vue";
+import ProofView from "./views/ProofView.vue";
+import PublishView from "./views/PublishView.vue";
+import Icon from "./components/Icon.vue";
+import type { IconName } from "./icons";
 import { checkForUpdate, updateAvailable, updateChecking, updateInstalling } from "./updater";
+import { startOverviewTimer, stopOverviewTimer } from "./overviewStore";
 
-type Page = "offers" | "ideas" | "settings";
+type Page = "overview" | "offers" | "icps" | "proof" | "ideas" | "publish" | "settings";
 
-const NAV: { id: Page; label: string }[] = [
-  { id: "offers", label: "Offers" },
-  { id: "ideas", label: "Ideas" },
-  { id: "settings", label: "Settings" },
+const PAGE_ICONS: Record<Page, IconName> = {
+  overview: "layoutDashboard",
+  offers: "layers",
+  icps: "target",
+  proof: "award",
+  ideas: "lightbulb",
+  publish: "calendar",
+  settings: "settings",
+};
+
+const NAV: { title: string | null; items: { id: Page; label: string }[] }[] = [
+  { title: null, items: [{ id: "overview", label: "Overview" }] },
+  { title: "Brain", items: [{ id: "offers", label: "Offers" }, { id: "icps", label: "ICPs" }, { id: "proof", label: "Proof" }] },
+  { title: "Content", items: [{ id: "ideas", label: "Ideas" }, { id: "publish", label: "Publish" }] },
+  { title: null, items: [{ id: "settings", label: "Settings" }] },
 ];
 
 const loading = ref(true);
@@ -21,6 +39,8 @@ const startupError = ref("");
 const session = ref<Session | null>(null);
 const page = ref<Page>("ideas");
 const appVersion = ref("");
+
+watch(session, (current) => (current ? startOverviewTimer() : stopOverviewTimer()));
 
 onMounted(async () => {
   try {
@@ -51,17 +71,29 @@ async function signOut() {
 
   <div v-else class="shell">
     <aside class="sidebar">
-      <div class="brand"><span class="brand-mark">GE</span> Growth Engine</div>
-      <button
-        v-for="item in NAV"
-        :key="item.id"
-        class="nav-item"
-        :class="{ active: page === item.id }"
-        :aria-current="page === item.id ? 'page' : undefined"
-        @click="page = item.id"
-      >
-        {{ item.label }}
-      </button>
+      <div class="brand">
+        <img src="/logo-sm.png" alt="Growth Engine icon" class="brand-icon" />
+        <div class="brand-text">
+          <span class="brand-name">Kinetik Dynamics</span>
+          <span class="brand-sub">Growth Engine</span>
+        </div>
+      </div>
+      <nav class="nav">
+        <div v-for="(group, index) in NAV" :key="index" class="nav-group" :class="{ 'nav-group-last': index === NAV.length - 1 }">
+          <div v-if="group.title" class="nav-title">{{ group.title }}</div>
+          <button
+            v-for="item in group.items"
+            :key="item.id"
+            class="nav-item"
+            :class="{ active: page === item.id }"
+            :aria-current="page === item.id ? 'page' : undefined"
+            @click="page = item.id"
+          >
+            <Icon class="nav-icon" :name="PAGE_ICONS[item.id]" :stroke="1.5" />
+            <span>{{ item.label }}</span>
+          </button>
+        </div>
+      </nav>
 
       <div class="sidebar-foot">
         <div class="who">
@@ -89,8 +121,12 @@ async function signOut() {
     </aside>
 
     <main class="main">
-      <OffersView v-if="page === 'offers'" />
+      <OverviewView v-if="page === 'overview'" :session="session" @navigate="page = $event" />
+      <OffersView v-else-if="page === 'offers'" />
+      <IcpsView v-else-if="page === 'icps'" />
+      <ProofView v-else-if="page === 'proof'" />
       <IdeasView v-else-if="page === 'ideas'" :session="session" @open-settings="page = 'settings'" />
+      <PublishView v-else-if="page === 'publish'" />
       <SettingsView v-else :session="session" />
     </main>
   </div>

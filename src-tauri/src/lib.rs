@@ -108,6 +108,17 @@ async fn list_offers(app: AppHandle, page: Option<u32>, search: Option<String>) 
     api::get_query(&config.session.base_url, &config.token, "/api/offers", &query).await
 }
 
+/// One of the main site's read-only pages, as the JSON its `/api/app/*` endpoint sends.
+#[tauri::command]
+async fn site_page(app: AppHandle, page: String) -> Result<Value, String> {
+    const PAGES: [&str; 4] = ["overview", "icps", "proof", "publish"];
+    if !PAGES.contains(&page.as_str()) {
+        return Err(format!("Unknown page: {page}"));
+    }
+    let config = signed_in(&app)?;
+    api::get(&config.session.base_url, &config.token, &format!("/api/app/{page}")).await
+}
+
 #[tauri::command]
 fn offer_idea_counts(app: AppHandle) -> Result<Vec<db::OfferIdeaCount>, String> {
     db::offer_idea_counts(&store::database(&app)?)
@@ -347,6 +358,7 @@ pub fn run() {
             login,
             logout,
             list_offers,
+            site_page,
             offer_idea_counts,
             detect_clis,
             test_cli,

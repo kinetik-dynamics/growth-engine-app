@@ -122,6 +122,89 @@ export interface PlanProgress {
   message: string;
 }
 
+export interface Named {
+  id: number;
+  name: string;
+}
+
+export interface Overview {
+  profile: { company_name: string | null; website_url: string | null; logo_url: string | null };
+  stats: {
+    leads: { total: number; thisWeek: number; lastWeek: number };
+    companies: { total: number; thisWeek: number };
+    emails: { found: number; missing: number };
+    posts: { sent30d: number; sentPrev30d: number; scheduled: number; drafts: number; failed: number };
+    ideas: { total: number; unused: number };
+  };
+  trend: { date: string; leads: number; posts: number }[];
+  pipeline: { id: number | null; name: string; color: string; count: number }[];
+  icps: { id: number; name: string; count: number }[];
+  recentLeads: {
+    key: string;
+    type: "lead" | "prospect";
+    name: string;
+    subtitle: string | null;
+    avatarUrl: string | null;
+    domain: string | null;
+    hasEmail: boolean;
+    createdAt: string;
+  }[];
+  upcomingPosts: { id: number; channel: string; platform: string | null; text: string; scheduledAt: string | null }[];
+  channels: { id: string; platform: string; name: string; handle: string; avatarUrl: string | null }[];
+  brain: { offers: number; icps: number; proof: number };
+}
+
+export interface SiteIcp {
+  id: number;
+  name: string;
+  who_they_are: string;
+  roles_to_contact: string | null;
+  buying_triggers: string | null;
+  pain: string | null;
+  criteria: string[] | null;
+  offers: Named[];
+  leads_count: number;
+  prospects_count: number;
+  searches_count: number;
+}
+
+export interface SiteProof {
+  id: number;
+  title: string;
+  client_name: string | null;
+  client_type: string | null;
+  industry: string | null;
+  result: string;
+  can_name_client: boolean;
+  offer: Named | null;
+}
+
+export interface PublishChannel {
+  id: string;
+  platform: string;
+  name: string;
+  handleOrSub: string;
+}
+
+export interface SitePost {
+  id: string;
+  channelId: string;
+  text: string;
+  status: string;
+  scheduledDate: string | null;
+  scheduledTime: string | null;
+  sentAt: string | null;
+  errorMessage: string | null;
+  tag: string | null;
+}
+
+export interface SitePages {
+  overview: { overview: Overview | null };
+  icps: { icps: SiteIcp[] };
+  proof: { proof: SiteProof[] };
+  publish: { channels: PublishChannel[]; posts: SitePost[] };
+}
+
 /** Ideas generated from an offer. Older ideas only recorded the offer's name. */
 export function ideaCountFor(offer: Offer, counts: OfferIdeaCount[]): number {
   return counts
@@ -141,6 +224,7 @@ export const api = {
   login: (baseUrl: string, token: string) => invoke<Session>("login", { baseUrl, token }),
   logout: () => invoke<void>("logout"),
   listOffers: (page = 1, search = "") => invoke<OfferPage>("list_offers", { page, search }),
+  sitePage: <K extends keyof SitePages>(page: K) => invoke<SitePages[K]>("site_page", { page }),
   detectClis: () => invoke<CliStatus[]>("detect_clis"),
   testCli: (provider: string) => invoke<string>("test_cli", { provider }),
   getSkill: () => invoke<string>("get_skill"),
