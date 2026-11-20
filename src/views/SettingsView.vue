@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref } from "vue";
+import { getVersion } from "@tauri-apps/api/app";
 import { api, errorMessage, type CliStatus, type Permission, type Session } from "../api";
 import {
   checkForUpdate,
@@ -10,15 +11,21 @@ import {
   updateInstalling,
   updateProgress,
 } from "../updater";
+import Icon from "../components/Icon.vue";
+import type { IconName } from "../icons";
+
+type Tab = "agents" | "skill" | "updates";
 
 defineProps<{ session: Session }>();
 
-const tab = ref<"agents" | "skill" | "updates">(updateAvailable.value ? "updates" : "agents");
+const tab = ref<Tab>(updateAvailable.value ? "updates" : "agents");
+const appVersion = ref("");
 
 /* AI agents */
 const clis = ref<CliStatus[] | null>(null);
 const cliError = ref("");
 const tests = reactive<Record<string, { state: "running" | "ok" | "failed"; detail: string }>>({});
+const connectedCount = computed(() => (clis.value ?? []).filter((c) => c.installed).length);
 
 async function scan() {
   cliError.value = "";
@@ -43,6 +50,10 @@ async function test(cli: CliStatus) {
 
 /* Tool permissions granted to agents from the planner */
 const permissions = ref<Permission[]>([]);
+
+function permissionsFor(cli: CliStatus) {
+  return permissions.value.filter((p) => p.provider === cli.id);
+}
 
 async function loadPermissions() {
   try {
@@ -70,6 +81,11 @@ const skillNotice = ref("");
 const saving = ref(false);
 const confirmingReset = ref(false);
 const dirty = computed(() => skill.value !== savedSkill.value);
+const skillStats = computed(() => {
+  const text = skill.value;
+  const words = text.trim() ? text.trim().split(/\s+/).length : 0;
+  return `${text.split("\n").length} lines · ${words} words`;
+});
 
 async function loadSkill() {
   try {
@@ -106,148 +122,243 @@ async function resetSkill() {
   }
 }
 
-onMounted(() => {
+/* Side navigation */
+const NAV = computed<{ id: Tab; label: string; icon: IconName; sub: string; dot?: "ok" | "warn" | "info" }[]>(() => [
+  {
+    id: "agents",
+    label: "AI agents",
+    icon: "bot",
+    sub: !clis.value ? "Scanning…" : connectedCount.value ? `${connectedCount.value} connected` : "None found",
+    dot: clis.value ? (connectedCount.value ? "ok" : "warn") : undefined,
+  },
+  {
+    id: "skill",
+    label: "Idea skill",
+    icon: "fileText",
+    sub: dirty.value ? "Unsaved changes" : "Instructions for plans",
+    dot: dirty.value ? "warn" : undefined,
+  },
+  {
+    id: "updates",
+    label: "Updates",
+    icon: "download",
+    sub: updateAvailable.value ? `v${updateAvailable.value.version} available` : appVersion.value ? `v${appVersion.value}` : "App version",
+    dot: updateAvailable.value ? "info" : undefined,
+  },
+]);
+
+onMounted(async () => {
   scan();
   loadPermissions();
   loadSkill();
+  try {
+    appVersion.value = await getVersion();
+  } catch {
+    appVersion.value = "";
+  }
 });
 </script>
 
 <template>
-  <header class="page-head">
-    <div class="row" style="gap: 20px">
-      <h1>Settings</h1>
-      <div class="tabs" role="tablist">
-        <button class="tab" :class="{ active: tab === 'agents' }" role="tab" :aria-selected="tab === 'agents'" @click="tab = 'agents'">AI agents</button>
-        <button class="tab" :class="{ active: tab === 'skill' }" role="tab" :aria-selected="tab === 'skill'" @click="tab = 'skill'">
-          Idea skill{{ dirty ? " •" : "" }}
-        </button>
-        <button class="tab" :class="{ active: tab === 'updates' }" role="tab" :aria-selected="tab === 'updates'" @click="tab = 'updates'">
-          Updates{{ updateAvailable ? " ●" : "" }}
-        </button>
+  <div class="st">
+    <div class="pub-header">
+      <div class="pub-header-left">
+        <h1 class="pub-title">Settings</h1>
       </div>
-    </div>
-    <span class="muted small">Connected to {{ session.baseUrl }}</span>
-  </header>
-
-  <div v-if="tab === 'agents'" class="page-body" >
-    <div class="row-between">
-      <p class="muted">Ideas are written by AI agent CLIs installed on this computer. The app finds them on your PATH.</p>
-      <button class="btn" :disabled="!clis" @click="scan">
-        <span v-if="!clis" class="spinner"></span>
-        {{ clis ? "Scan again" : "Scanning…" }}
-      </button>
+      <span class="st-server" :title="session.baseUrl">
+        <span class="st-dot ok"></span>
+        <span>Connected to <b>{{ session.baseUrl }}</b></span>
+      </span>
     </div>
 
-    <div v-if="cliError" class="alert alert-error" role="alert">{{ cliError }}</div>
-
-    <div v-if="!clis" class="stack" aria-busy="true">
-      <div v-for="n in 4" :key="n" class="skeleton" style="height: 68px"></div>
-    </div>
-
-    <div v-else class="stack">
-      <div v-for="cli in clis" :key="cli.id" class="card stack">
-        <div class="row-between">
-          <div>
-            <div class="row" style="gap: 8px">
-              <h2>{{ cli.name }}</h2>
-              <span class="badge" :class="{ 'badge-success': cli.installed }">{{ cli.installed ? "Connected" : "Not installed" }}</span>
-              <span v-if="cli.version" class="muted small">{{ cli.version }}</span>
-            </div>
-            <div class="muted small">
-              {{ cli.installed ? cli.path : `No "${cli.command}" command found on PATH. Install it, sign in, then scan again.` }}
-            </div>
-          </div>
-          <button v-if="cli.installed" class="btn btn-sm" :disabled="tests[cli.id]?.state === 'running'" @click="test(cli)">
-            <span v-if="tests[cli.id]?.state === 'running'" class="spinner"></span>
-            {{ tests[cli.id]?.state === "running" ? "Testing…" : "Test connection" }}
+    <div class="pub-layout">
+      <aside class="pub-channels" aria-label="Settings sections">
+        <div class="pub-channels-head"><span>Sections</span></div>
+        <nav class="pub-channels-list">
+          <button
+            v-for="item in NAV"
+            :key="item.id"
+            class="st-nav"
+            :class="{ active: tab === item.id }"
+            :aria-current="tab === item.id ? 'page' : undefined"
+            @click="tab = item.id"
+          >
+            <span class="st-nav-icon"><Icon :name="item.icon" :size="14" /></span>
+            <span class="st-nav-text">
+              <span class="st-nav-name">
+                <span>{{ item.label }}</span>
+                <span v-if="item.dot" class="st-dot" :class="item.dot"></span>
+              </span>
+              <span class="st-nav-sub">{{ item.sub }}</span>
+            </span>
           </button>
+        </nav>
+        <div class="pub-channels-foot st-foot">
+          <span>Growth Engine</span>
+          <span v-if="appVersion" class="st-version">v{{ appVersion }}</span>
         </div>
-        <div v-if="cli.installed" class="row" style="flex-wrap: wrap; gap: 6px">
-          <span class="label">Allowed tools:</span>
-          <span v-if="!permissions.some((p) => p.provider === cli.id)" class="muted small">
-            None. If {{ cli.name }} needs a tool while planning, the planner asks you to allow it.
-          </span>
-          <span v-for="permission in permissions.filter((p) => p.provider === cli.id)" :key="permission.tool" class="row" style="gap: 4px">
-            <code>{{ permission.tool }}</code>
-            <button class="btn btn-sm btn-ghost btn-danger" :aria-label="`Revoke ${permission.tool} for ${cli.name}`" @click="revoke(permission)">
-              Revoke
+      </aside>
+
+      <main class="pub-main">
+        <!-- AI agents -->
+        <div v-if="tab === 'agents'" class="pub-section">
+          <div class="pub-section-head st-section-head">
+            <div>
+              <h2>AI agents{{ clis ? ` (${connectedCount} connected)` : "" }}</h2>
+              <p>Ideas are written by AI agent CLIs installed on this computer. The app finds them on your PATH.</p>
+            </div>
+            <button class="st-btn" :disabled="!clis" @click="scan">
+              <span v-if="!clis" class="spinner"></span>
+              <Icon v-else name="refresh" :size="14" />
+              {{ clis ? "Scan again" : "Scanning…" }}
             </button>
-          </span>
-        </div>
-        <div v-if="tests[cli.id]?.state === 'ok'" class="alert alert-success" role="status">Working. {{ tests[cli.id].detail }}</div>
-        <div v-if="tests[cli.id]?.state === 'failed'" class="alert alert-error" role="alert">{{ tests[cli.id].detail }}</div>
-      </div>
-    </div>
-  </div>
-
-  <div v-else-if="tab === 'updates'" class="page-body" style="max-width: 600px">
-    <div class="card stack">
-      <div class="row-between">
-        <div>
-          <h2>App updates</h2>
-          <p class="muted small" style="margin-top: 4px">Growth Engine checks for updates automatically on launch.</p>
-        </div>
-        <button class="btn" :disabled="updateChecking || updateInstalling" @click="checkForUpdate">
-          <span v-if="updateChecking" class="spinner"></span>
-          {{ updateChecking ? "Checking…" : "Check now" }}
-        </button>
-      </div>
-
-      <div v-if="!updateAvailable && !updateChecking" class="alert alert-success" role="status">
-        You're up to date.
-      </div>
-
-      <template v-if="updateAvailable">
-        <div class="update-info">
-          <div class="row" style="gap: 10px">
-            <span class="badge badge-primary">v{{ updateAvailable.version }} available</span>
           </div>
-          <div v-if="updateAvailable.body" class="update-notes">{{ updateAvailable.body }}</div>
+
+          <div v-if="cliError" class="alert alert-error" role="alert">{{ cliError }}</div>
+
+          <div v-if="!clis" class="pub-list" aria-busy="true">
+            <div v-for="n in 3" :key="n" class="skeleton" style="height: 96px"></div>
+          </div>
+
+          <div v-else-if="!clis.length && !cliError" class="pub-empty">
+            <Icon name="terminal" :size="32" />
+            <p class="pub-empty-title">No supported agents</p>
+            <p>Install an AI agent CLI, sign in, then scan again.</p>
+          </div>
+
+          <div v-else class="pub-list">
+            <div v-for="cli in clis" :key="cli.id" class="st-card" :class="{ muted: !cli.installed }">
+              <div class="st-card-head">
+                <div class="st-card-title">
+                  <span class="st-card-icon"><Icon name="terminal" :size="16" /></span>
+                  <div class="st-card-meta">
+                    <div class="st-card-name">
+                      <span>{{ cli.name }}</span>
+                      <span class="st-pill" :class="cli.installed ? 'ok' : 'off'">
+                        <span class="st-dot" :class="cli.installed ? 'ok' : 'off'"></span>
+                        {{ cli.installed ? "Connected" : "Not installed" }}
+                      </span>
+                      <span v-if="cli.version" class="st-card-version">{{ cli.version }}</span>
+                    </div>
+                    <div class="st-card-path" :title="cli.path ?? undefined">
+                      {{ cli.installed ? cli.path : `No "${cli.command}" command found on PATH. Install it, sign in, then scan again.` }}
+                    </div>
+                  </div>
+                </div>
+                <button v-if="cli.installed" class="st-btn" :disabled="tests[cli.id]?.state === 'running'" @click="test(cli)">
+                  <span v-if="tests[cli.id]?.state === 'running'" class="spinner"></span>
+                  <Icon v-else name="play" :size="12" />
+                  {{ tests[cli.id]?.state === "running" ? "Testing…" : "Test connection" }}
+                </button>
+              </div>
+
+              <div v-if="cli.installed" class="st-card-foot">
+                <span class="st-label">Allowed tools</span>
+                <span v-if="!permissionsFor(cli).length" class="st-hint">
+                  None. If {{ cli.name }} needs a tool while planning, the planner asks you to allow it.
+                </span>
+                <span v-for="permission in permissionsFor(cli)" :key="permission.tool" class="st-tool">
+                  <code>{{ permission.tool }}</code>
+                  <button class="st-tool-x" :title="`Revoke ${permission.tool}`" :aria-label="`Revoke ${permission.tool} for ${cli.name}`" @click="revoke(permission)">
+                    <Icon name="x" :size="12" />
+                  </button>
+                </span>
+              </div>
+
+              <div v-if="tests[cli.id]?.state === 'ok'" class="st-result ok" role="status">
+                <Icon name="checkCircle" :size="14" /> Working. {{ tests[cli.id].detail }}
+              </div>
+              <div v-if="tests[cli.id]?.state === 'failed'" class="st-result bad" role="alert">
+                <Icon name="alertCircle" :size="14" /> {{ tests[cli.id].detail }}
+              </div>
+            </div>
+          </div>
         </div>
 
-        <div v-if="updateInstalling" class="stack" style="gap: 8px">
-          <div class="row-between">
-            <span class="small">Downloading update…</span>
-            <span class="small muted">{{ updateProgress }}%</span>
+        <!-- Idea skill -->
+        <div v-else-if="tab === 'skill'" class="pub-section">
+          <div class="pub-section-head st-section-head">
+            <div>
+              <h2>Idea skill</h2>
+              <p>These instructions are sent to the AI agent with every plan. Edit them to change how ideas are written.</p>
+            </div>
           </div>
-          <div class="progress-bar">
-            <div class="progress-fill" :style="{ width: updateProgress + '%' }"></div>
+
+          <div class="st-editor">
+            <div class="st-editor-bar">
+              <label for="skill">SKILL.md</label>
+              <span v-if="skillLoaded">{{ skillStats }}<template v-if="dirty"> · <b>Unsaved</b></template></span>
+            </div>
+            <div v-if="!skillLoaded" class="skeleton" style="height: 420px; border-radius: 0"></div>
+            <textarea v-else id="skill" v-model="skill" class="st-textarea" rows="24" spellcheck="false" @input="skillNotice = ''"></textarea>
           </div>
-          <p class="muted small">The app will restart automatically when the update is ready.</p>
+
+          <div v-if="skillError" class="alert alert-error" role="alert">{{ skillError }}</div>
+          <div v-if="skillNotice" class="alert alert-success" role="status">{{ skillNotice }}</div>
+
+          <div class="st-actions">
+            <div v-if="confirmingReset" class="st-confirm">
+              <span>Replace your skill with the default? Your edits will be lost.</span>
+              <button class="btn btn-sm btn-danger-solid" @click="resetSkill">Reset skill</button>
+              <button class="btn btn-sm" @click="confirmingReset = false">Keep my skill</button>
+            </div>
+            <button v-else class="st-btn" @click="confirmingReset = true"><Icon name="rotateCcw" :size="14" /> Reset to default</button>
+            <button class="btn btn-primary" :disabled="saving || !skillLoaded || !dirty" @click="saveSkill">
+              <span v-if="saving" class="spinner"></span>
+              {{ saving ? "Saving…" : dirty ? "Save skill" : "Saved" }}
+            </button>
+          </div>
         </div>
 
-        <button v-else class="btn btn-primary" style="align-self: flex-start" @click="installUpdate">
-          Install update v{{ updateAvailable.version }}
-        </button>
-      </template>
+        <!-- Updates -->
+        <div v-else class="pub-section st-narrow">
+          <div class="pub-section-head st-section-head">
+            <div>
+              <h2>App updates</h2>
+              <p>Growth Engine checks for updates automatically on launch.</p>
+            </div>
+            <button class="st-btn" :disabled="updateChecking || updateInstalling" @click="checkForUpdate">
+              <span v-if="updateChecking" class="spinner"></span>
+              <Icon v-else name="refresh" :size="14" />
+              {{ updateChecking ? "Checking…" : "Check now" }}
+            </button>
+          </div>
 
-      <div v-if="updateError" class="alert alert-error" role="alert">{{ updateError }}</div>
-    </div>
-  </div>
+          <div class="st-card">
+            <div class="st-card-head">
+              <div class="st-card-title">
+                <span class="st-card-icon" :class="{ info: updateAvailable }"><Icon :name="updateAvailable ? 'download' : 'checkCircle'" :size="16" /></span>
+                <div class="st-card-meta">
+                  <div class="st-card-name">
+                    <span>{{ updateAvailable ? `Version ${updateAvailable.version} is available` : updateChecking ? "Checking for updates…" : "You're up to date" }}</span>
+                    <span v-if="updateAvailable" class="st-pill info">New</span>
+                  </div>
+                  <div class="st-card-path">Installed version {{ appVersion ? `v${appVersion}` : "—" }}</div>
+                </div>
+              </div>
+              <button v-if="updateAvailable && !updateInstalling" class="btn btn-primary btn-sm" @click="installUpdate">
+                Install v{{ updateAvailable.version }}
+              </button>
+            </div>
 
-  <div v-else-if="tab === 'skill'" class="page-body">
-    <div class="field">
-      <label for="skill">Idea skill</label>
-      <p class="muted small">These instructions are sent to the AI agent with every plan. Edit them to change how ideas are written.</p>
-      <div v-if="!skillLoaded" class="skeleton" style="height: 420px"></div>
-      <textarea v-else id="skill" v-model="skill" class="input" rows="24" spellcheck="false" @input="skillNotice = ''"></textarea>
-    </div>
+            <div v-if="updateAvailable?.body" class="st-notes">
+              <span class="st-label">What's new</span>
+              <div class="update-notes">{{ updateAvailable.body }}</div>
+            </div>
 
-    <div v-if="skillError" class="alert alert-error" role="alert">{{ skillError }}</div>
-    <div v-if="skillNotice" class="alert alert-success" role="status">{{ skillNotice }}</div>
+            <div v-if="updateInstalling" class="st-progress">
+              <div class="st-progress-row">
+                <span>Downloading update…</span>
+                <span>{{ updateProgress }}%</span>
+              </div>
+              <div class="progress-bar"><div class="progress-fill" :style="{ width: updateProgress + '%' }"></div></div>
+              <p>The app will restart automatically when the update is ready.</p>
+            </div>
+          </div>
 
-    <div class="row-between">
-      <div v-if="confirmingReset" class="row">
-        <span>Replace your skill with the default? Your edits will be lost.</span>
-        <button class="btn btn-sm btn-danger" @click="resetSkill">Reset skill</button>
-        <button class="btn btn-sm" @click="confirmingReset = false">Keep my skill</button>
-      </div>
-      <button v-else class="btn" @click="confirmingReset = true">Reset to default</button>
-      <button class="btn btn-primary" :disabled="saving || !skillLoaded" @click="saveSkill">
-        <span v-if="saving" class="spinner"></span>
-        {{ saving ? "Saving…" : dirty ? "Save skill" : "Saved" }}
-      </button>
+          <div v-if="updateError" class="alert alert-error" role="alert">{{ updateError }}</div>
+        </div>
+      </main>
     </div>
   </div>
 </template>
