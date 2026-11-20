@@ -206,18 +206,26 @@ export interface PublishChannel {
   platform: string;
   name: string;
   handleOrSub: string;
+  avatarUrl: string | null;
+  status: string;
+  isPaused: boolean;
 }
+
+export type PostStatus = "Draft" | "Needs approval" | "Scheduled" | "Publishing" | "Sent" | "Failed";
 
 export interface SitePost {
   id: string;
+  ideaId: number | null;
   channelId: string;
   text: string;
-  status: string;
+  status: PostStatus;
   scheduledDate: string | null;
   scheduledTime: string | null;
   sentAt: string | null;
   errorMessage: string | null;
+  siblingPostIds: string[];
   tag: string | null;
+  pattern: string | null;
 }
 
 export interface SitePages {

@@ -126,7 +126,7 @@ async function signOut() {
       <IcpsView v-else-if="page === 'icps'" :session="session" />
       <ProofView v-else-if="page === 'proof'" />
       <IdeasView v-else-if="page === 'ideas'" :session="session" @open-settings="page = 'settings'" />
-      <PublishView v-else-if="page === 'publish'" />
+      <PublishView v-else-if="page === 'publish'" :session="session" />
       <SettingsView v-else :session="session" />
     </main>
   </div>
