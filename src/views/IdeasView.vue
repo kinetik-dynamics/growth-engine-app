@@ -1,9 +1,11 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from "vue";
 import { api, errorMessage, type Idea, type IdeaTab, type Session } from "../api";
+import Icon from "../components/Icon.vue";
 import Pagination from "../components/Pagination.vue";
 import PlanWeekView from "./PlanWeekView.vue";
 import IdeaDetailView from "./IdeaDetailView.vue";
+import BulkPublishView from "./BulkPublishView.vue";
 
 defineProps<{ session: Session }>();
 const emit = defineEmits<{ openSettings: [] }>();
@@ -22,8 +24,14 @@ const newTitle = ref("");
 const planning = ref(false);
 const openIdeaId = ref<string | null>(null);
 const tab = ref<IdeaTab>("drafts");
+const confirmDeleteId = ref<string | null>(null);
+
+/** Ideas ticked for publishing together, kept across pages and tabs. */
+const picked = ref<Map<string, Idea>>(new Map());
+const bulkIdeas = ref<Idea[] | null>(null);
 
 const openIdea = computed(() => ideas.value?.find((idea) => idea.id === openIdeaId.value) ?? null);
+const allOnPagePicked = computed(() => !!ideas.value?.length && ideas.value.every((idea) => picked.value.has(idea.id)));
 
 async function load(target = page.value) {
   loading.value = true;
@@ -88,6 +96,7 @@ async function onGenerated(created: Idea[], requested: number) {
 
 function onSaved(saved: Idea) {
   ideas.value = (ideas.value ?? []).map((idea) => (idea.id === saved.id ? saved : idea));
+  if (picked.value.has(saved.id)) picked.value.set(saved.id, saved);
 }
 
 /** Sending moves an idea to the other tab, so the page is re-read on the way back. */
@@ -97,12 +106,60 @@ function closeIdea() {
 }
 
 async function onDeleted() {
+  if (openIdeaId.value) picked.value.delete(openIdeaId.value);
   await closeIdea();
   notice.value = "Idea deleted.";
 }
 
-function sentLabel(idea: Idea): string {
-  return new Date(idea.sentAt ?? 0).toLocaleDateString("en-US", { month: "short", day: "numeric" });
+async function deleteIdea(idea: Idea) {
+  error.value = "";
+  try {
+    await api.deleteIdea(idea.id);
+    picked.value.delete(idea.id);
+    confirmDeleteId.value = null;
+    await load();
+    notice.value = "Idea deleted.";
+  } catch (caught) {
+    error.value = errorMessage(caught);
+  }
+}
+
+function togglePicked(idea: Idea) {
+  const next = new Map(picked.value);
+  if (next.has(idea.id)) next.delete(idea.id);
+  else next.set(idea.id, idea);
+  picked.value = next;
+}
+
+function togglePage() {
+  const next = new Map(picked.value);
+  const pick = !allOnPagePicked.value;
+  for (const idea of ideas.value ?? []) {
+    if (pick) next.set(idea.id, idea);
+    else next.delete(idea.id);
+  }
+  picked.value = next;
+}
+
+function closeBulk(published: boolean) {
+  bulkIdeas.value = null;
+  if (published) {
+    picked.value = new Map();
+    notice.value = "The selected ideas were sent to the publish queue.";
+  }
+  return load();
+}
+
+/** Where the idea stands, in the web app's words: a draft post saved, or sent to Publish. */
+function publishState(idea: Idea): "Sent" | "Draft" | null {
+  if (idea.publishedAt) return "Sent";
+  if (idea.publishChannels.length) return "Draft";
+  return null;
+}
+
+function actionLabel(idea: Idea) {
+  const state = publishState(idea);
+  return state === "Sent" ? "Edit post" : state === "Draft" ? "Continue draft" : "Write post";
 }
 </script>
 
@@ -125,31 +182,34 @@ function sentLabel(idea: Idea): string {
     @deleted="onDeleted"
   />
 
-  <template v-else>
-    <header class="page-head">
-      <div class="row" style="gap: 20px">
-        <h1>Ideas</h1>
-        <div class="tabs" role="tablist" aria-label="Ideas">
-          <button class="tab" :class="{ active: tab === 'drafts' }" role="tab" :aria-selected="tab === 'drafts'" @click="showTab('drafts')">
-            Drafts <span class="tab-count">{{ draftCount }}</span>
-          </button>
-          <button class="tab" :class="{ active: tab === 'sent' }" role="tab" :aria-selected="tab === 'sent'" @click="showTab('sent')">
-            Sent <span class="tab-count">{{ sentCount }}</span>
-          </button>
-        </div>
-      </div>
-      <button class="btn btn-primary" @click="planning = true">Plan next week</button>
-    </header>
+  <BulkPublishView v-else-if="bulkIdeas" :ideas="bulkIdeas" :session="session" @close="closeBulk" @saved="onSaved" />
 
-    <div class="page-body">
-      <form v-if="tab === 'drafts'" class="row" @submit.prevent="addIdea">
-        <label for="new-idea" class="label" style="white-space: nowrap">New idea</label>
-        <input id="new-idea" v-model="newTitle" class="input" placeholder="Press Enter to save" />
-        <button class="btn" type="submit" :disabled="!newTitle.trim()">Add idea</button>
-      </form>
-      <p v-else class="muted">
-        These ideas are on the main site's Ideas page. Open one to edit it and send the update.
-      </p>
+  <div v-else class="iv">
+    <div class="iv-header">
+      <div class="iv-header-left">
+        <h1>Ideas</h1>
+        <nav class="iv-tabs" aria-label="Ideas tabs">
+          <button class="iv-tab" :class="{ active: tab === 'drafts' }" :aria-current="tab === 'drafts' ? 'page' : undefined" @click="showTab('drafts')">
+            Drafts ({{ draftCount }})
+          </button>
+          <button class="iv-tab" :class="{ active: tab === 'sent' }" :aria-current="tab === 'sent' ? 'page' : undefined" @click="showTab('sent')">
+            Sent ({{ sentCount }})
+          </button>
+        </nav>
+      </div>
+      <button class="iv-plan" @click="planning = true"><Icon name="sparkles" :size="14" /> Plan next week</button>
+    </div>
+
+    <div class="iv-body">
+      <input
+        v-if="tab === 'drafts'"
+        v-model="newTitle"
+        class="iv-add"
+        placeholder="Add an idea… (Press Enter to save)"
+        aria-label="Add an idea"
+        @keydown.enter="addIdea"
+      />
+      <p v-else class="iv-hint">These ideas are on the website's Ideas page. Open one to edit it, send the update or publish it.</p>
 
       <div v-if="error" class="alert alert-error" role="alert">{{ error }}</div>
       <div v-if="notice" class="alert alert-success row-between" role="status">
@@ -157,47 +217,79 @@ function sentLabel(idea: Idea): string {
         <button class="btn btn-sm btn-ghost" @click="notice = ''">Dismiss</button>
       </div>
 
-      <div v-if="!ideas" class="grid" aria-busy="true">
-        <div v-for="n in 3" :key="n" class="skeleton" style="height: 220px"></div>
-      </div>
-
-      <div v-else-if="!ideas.length && tab === 'drafts'" class="card empty">
-        <h2>{{ sentCount ? "No drafts left" : "No ideas yet" }}</h2>
-        <p class="muted">Let your AI agent draft next week's ideas from one of your offers.</p>
-        <button class="btn btn-primary" @click="planning = true">Plan next week</button>
-      </div>
-
-      <div v-else-if="!ideas.length" class="card empty">
-        <h2>Nothing sent yet</h2>
-        <p class="muted">Open a draft, polish it, then send it to the main site. It will show up here.</p>
-        <button class="btn" @click="showTab('drafts')">View drafts</button>
-      </div>
-
-      <div v-else class="grid" :aria-busy="loading">
-        <button
-          v-for="idea in ideas"
-          :key="idea.id"
-          type="button"
-          class="card idea idea-card"
-          :aria-label="`Open idea: ${idea.title}`"
-          @click="openIdeaId = idea.id"
-        >
-          <span class="row-between">
-            <span class="muted small">{{ idea.source }}</span>
-            <span class="row" style="gap: 6px; flex-wrap: wrap; justify-content: flex-end">
-              <span v-if="idea.sentAt" class="badge badge-success">Sent {{ sentLabel(idea) }}</span>
-              <span v-if="idea.tag" class="badge">{{ idea.tag }}</span>
-            </span>
-          </span>
-          <span class="idea-title">{{ idea.title }}</span>
-          <span v-if="idea.shortNotes" class="small idea-notes">{{ idea.shortNotes }}</span>
-
-          <span v-if="idea.channelName || idea.pattern || idea.offerName" class="idea-meta">
-            <span v-if="idea.channelName"><b>Channel:</b> {{ idea.channelName }}</span>
-            <span v-if="idea.pattern"><b>Pattern:</b> {{ idea.pattern }}</span>
-            <span v-if="idea.offerName"><b>Offer:</b> {{ idea.offerName }}</span>
-          </span>
+      <div v-if="ideas?.length || picked.size" class="iv-select" :class="{ active: picked.size > 0 }">
+        <button class="iv-select-toggle" :disabled="!ideas?.length" @click="togglePage">
+          <span :class="allOnPagePicked ? 'iv-check-on' : 'iv-check-off'"><Icon :name="allOnPagePicked ? 'squareCheck' : 'square'" /></span>
+          <span>{{ picked.size ? `${picked.size} selected` : "Select ideas to publish several at once" }}</span>
         </button>
+        <div v-if="picked.size" class="iv-select-actions">
+          <button class="iv-clear" @click="picked = new Map()">Clear</button>
+          <button class="iv-publish" @click="bulkIdeas = [...picked.values()]">
+            <Icon name="send" :size="14" /> Publish selected ({{ picked.size }})
+          </button>
+        </div>
+      </div>
+
+      <div v-if="!ideas" class="iv-grid" aria-busy="true">
+        <div v-for="n in 3" :key="n" class="skeleton" style="height: 240px"></div>
+      </div>
+
+      <div v-else-if="!ideas.length && tab === 'drafts'" class="iv-empty">
+        <h3>{{ sentCount ? "No drafts left" : "No ideas yet" }}</h3>
+        <p>Let your AI agent draft next week's ideas from one of your offers, or type one above and press Enter.</p>
+        <button class="iv-plan" @click="planning = true"><Icon name="sparkles" :size="14" /> Plan next week</button>
+      </div>
+
+      <div v-else-if="!ideas.length" class="iv-empty">
+        <h3>Nothing sent yet</h3>
+        <p>Open a draft, polish it, then send it to the website. It will show up here.</p>
+        <button class="iv-secondary" @click="showTab('drafts')">View drafts</button>
+      </div>
+
+      <div v-else class="iv-grid" :aria-busy="loading">
+        <article v-for="idea in ideas" :key="idea.id" class="iv-card" :class="{ picked: picked.has(idea.id) }">
+          <div class="iv-card-body">
+            <div class="iv-card-top">
+              <label class="iv-source">
+                <input type="checkbox" :checked="picked.has(idea.id)" :aria-label="`Select the idea “${idea.title}”`" @change="togglePicked(idea)" />
+                {{ idea.source }}
+              </label>
+              <div class="iv-badges">
+                <span v-if="publishState(idea) === 'Draft'" class="iv-badge iv-badge-draft" title="A draft post is saved for this idea">
+                  <Icon name="fileText" :size="12" /> Draft
+                </span>
+                <span v-if="publishState(idea) === 'Sent'" class="iv-badge iv-badge-sent" title="This idea was sent to Publish">
+                  <Icon name="send" :size="12" /> Sent
+                </span>
+                <span v-if="idea.sentAt && !idea.publishedAt" class="iv-badge iv-badge-web" title="This idea is on the website's Ideas page">On website</span>
+                <span v-if="idea.tag" class="iv-tag">{{ idea.tag }}</span>
+              </div>
+            </div>
+            <h3 class="iv-title">{{ idea.title }}</h3>
+            <p v-if="idea.shortNotes" class="iv-notes">{{ idea.shortNotes }}</p>
+            <div class="iv-meta">
+              <div v-if="idea.painAddressed" class="iv-truncate"><b>Pain:</b> {{ idea.painAddressed }}</div>
+              <div v-if="idea.pattern"><b>Pattern:</b> {{ idea.pattern }}</div>
+              <div v-if="idea.targetKeyword" class="iv-truncate"><b>Keyword:</b> {{ idea.targetKeyword }}</div>
+              <div v-if="idea.offerName" class="iv-truncate"><b>Offer:</b> {{ idea.offerName }}</div>
+            </div>
+          </div>
+          <div class="iv-card-foot">
+            <template v-if="confirmDeleteId === idea.id">
+              <span class="iv-confirm">Delete this idea?</span>
+              <div class="iv-confirm-actions">
+                <button class="iv-confirm-no" @click="confirmDeleteId = null">Keep</button>
+                <button class="iv-confirm-yes" @click="deleteIdea(idea)">Delete</button>
+              </div>
+            </template>
+            <template v-else>
+              <button class="iv-write" @click="openIdeaId = idea.id">{{ actionLabel(idea) }} <Icon name="arrowRight" :size="12" /></button>
+              <button class="iv-trash" title="Delete idea" aria-label="Delete idea" @click="confirmDeleteId = idea.id">
+                <Icon name="trash" :size="14" />
+              </button>
+            </template>
+          </div>
+        </article>
       </div>
 
       <Pagination
@@ -210,5 +302,5 @@ function sentLabel(idea: Idea): string {
         @change="goToPage"
       />
     </div>
-  </template>
+  </div>
 </template>

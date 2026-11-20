@@ -228,24 +228,128 @@ fn update_idea(app: AppHandle, mut idea: db::IdeaEdit) -> Result<Idea, String> {
 #[tauri::command]
 async fn send_idea(app: AppHandle, id: String) -> Result<Idea, String> {
     let config = signed_in(&app)?;
-    let idea = db::get_idea(&store::database(&app)?, &id)?;
+    upload_idea(&app, &config, &id).await
+}
+
+/// Puts the local idea on the main site (or updates it there) and returns
+/// it with its remote id.
+async fn upload_idea(app: &AppHandle, config: &Config, id: &str) -> Result<Idea, String> {
+    let idea = db::get_idea(&store::database(app)?, id)?;
+    let blank = |value: &str| if value.trim().is_empty() { None } else { Some(value.to_string()) };
 
     let body = serde_json::json!({
         "external_id": idea.id,
         "offer_id": idea.offer_id,
         "title": idea.title,
-        "short_notes": idea.short_notes,
-        "pain_addressed": idea.pain_addressed,
-        "target_keyword": idea.target_keyword,
-        "pattern": idea.pattern,
-        "tag": idea.tag,
+        "short_notes": blank(&idea.short_notes),
+        "pain_addressed": blank(&idea.pain_addressed),
+        "target_keyword": blank(&idea.target_keyword),
+        "pattern": blank(&idea.pattern),
+        "tag": blank(&idea.tag),
         "target_channel_id": idea.channel_id,
-        "suggested_draft": idea.suggested_draft,
+        "suggested_draft": blank(&idea.suggested_draft),
         "image_prompt": idea.image_prompt,
+        "provider": idea.provider,
+        "planned_date": idea.scheduled_date,
+        "planned_time": idea.scheduled_time,
     });
     let response = api::post(&config.session.base_url, &config.token, "/api/ideas", &body).await?;
 
-    db::mark_sent(&store::database(&app)?, &id, response["idea"]["id"].as_i64(), now_ms())
+    db::mark_sent(&store::database(app)?, id, response["idea"]["id"].as_i64(), now_ms())
+}
+
+fn remote_id_of(idea: &Idea) -> Result<i64, String> {
+    idea.remote_id
+        .ok_or_else(|| "The main site didn't return an id for this idea. Send it again.".to_string())
+}
+
+/// The channels the main site can publish to.
+#[tauri::command]
+async fn list_channels(app: AppHandle) -> Result<Value, String> {
+    let config = signed_in(&app)?;
+    api::get(&config.session.base_url, &config.token, "/api/channels").await
+}
+
+/// The main site's copy of a sent idea, with its saved posts.
+#[tauri::command]
+async fn get_remote_idea(app: AppHandle, remote_id: i64) -> Result<Value, String> {
+    let config = signed_in(&app)?;
+    api::get(&config.session.base_url, &config.token, &format!("/api/ideas/{remote_id}")).await
+}
+
+#[tauri::command]
+fn list_patterns(app: AppHandle) -> Result<Vec<String>, String> {
+    db::list_patterns(&store::database(&app)?)
+}
+
+/// The main site's "Send" on its Write post page: the idea is sent (or
+/// updated) first, then its post joins the publish queue on every picked
+/// channel at its scheduled time.
+#[tauri::command]
+async fn publish_idea(app: AppHandle, id: String) -> Result<Idea, String> {
+    let config = signed_in(&app)?;
+    let idea = upload_idea(&app, &config, &id).await?;
+    if idea.publish_channels.is_empty() {
+        return Err("Pick at least one channel to publish to.".into());
+    }
+    if idea.suggested_draft.trim().is_empty() {
+        return Err("Write the post before sending it.".into());
+    }
+
+    let body = serde_json::json!({
+        "action": "send",
+        "text": idea.suggested_draft,
+        "pattern": if idea.pattern.is_empty() { None } else { Some(&idea.pattern) },
+        "channels": idea.publish_channels.iter().map(|channel| serde_json::json!({
+            "id": channel.id,
+            "scheduled_date": channel.scheduled_date,
+            "scheduled_time": channel.scheduled_time,
+        })).collect::<Vec<_>>(),
+    });
+    let path = format!("/api/ideas/{}/posts", remote_id_of(&idea)?);
+    api::post(&config.session.base_url, &config.token, &path, &body).await?;
+
+    db::mark_published(&store::database(&app)?, &id, now_ms())
+}
+
+/// One idea picked on the bulk publish page and when it goes out.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BulkIdea {
+    id: String,
+    scheduled_date: String,
+    scheduled_time: String,
+}
+
+/// The main site's "Send all" on its bulk publish page: every idea is sent
+/// (or updated) first, then all their posts are queued together.
+#[tauri::command]
+async fn publish_ideas(app: AppHandle, ideas: Vec<BulkIdea>, channels: Vec<String>) -> Result<Vec<Idea>, String> {
+    if ideas.is_empty() {
+        return Err("Pick at least one idea to publish.".into());
+    }
+    if channels.is_empty() {
+        return Err("Pick at least one channel to publish to.".into());
+    }
+    let config = signed_in(&app)?;
+
+    let mut entries = Vec::with_capacity(ideas.len());
+    for picked in &ideas {
+        let idea = upload_idea(&app, &config, &picked.id).await?;
+        entries.push(serde_json::json!({
+            "id": remote_id_of(&idea)?,
+            "text": if idea.suggested_draft.trim().is_empty() { None } else { Some(&idea.suggested_draft) },
+            "scheduled_date": picked.scheduled_date,
+            "scheduled_time": picked.scheduled_time,
+        }));
+    }
+
+    let body = serde_json::json!({ "action": "send", "channels": channels, "ideas": entries });
+    api::post(&config.session.base_url, &config.token, "/api/ideas/posts/bulk", &body).await?;
+
+    let conn = store::database(&app)?;
+    let published_at = now_ms();
+    ideas.iter().map(|picked| db::mark_published(&conn, &picked.id, published_at)).collect()
 }
 
 /// Stops the plan that is currently generating, if any.
@@ -388,6 +492,11 @@ pub fn run() {
             delete_idea,
             update_idea,
             send_idea,
+            list_channels,
+            get_remote_idea,
+            list_patterns,
+            publish_idea,
+            publish_ideas,
             cancel_plan,
             generate_plan
         ])

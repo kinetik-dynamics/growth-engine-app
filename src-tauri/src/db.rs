@@ -50,6 +50,23 @@ pub struct Idea {
     /// The idea's id on the main site once sent.
     #[serde(default)]
     pub remote_id: Option<i64>,
+    /// The channels picked on the Write post page, each with its schedule.
+    #[serde(default)]
+    pub publish_channels: Vec<ChannelSchedule>,
+    /// When the idea's post was last sent to the main site's publish queue.
+    #[serde(default)]
+    pub published_at: Option<u64>,
+}
+
+/// One channel a post goes out on, and when.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChannelSchedule {
+    pub id: String,
+    #[serde(default)]
+    pub scheduled_date: Option<String>,
+    #[serde(default)]
+    pub scheduled_time: Option<String>,
 }
 
 /// The fields a user can change on the idea's page.
@@ -67,6 +84,8 @@ pub struct IdeaEdit {
     pub channel_name: Option<String>,
     pub suggested_draft: String,
     pub image_prompt: Option<String>,
+    #[serde(default)]
+    pub publish_channels: Vec<ChannelSchedule>,
 }
 
 impl Idea {
@@ -94,6 +113,8 @@ impl Idea {
             created_at,
             sent_at: None,
             remote_id: None,
+            publish_channels: Vec::new(),
+            published_at: None,
         }
     }
 }
@@ -162,10 +183,19 @@ CREATE TABLE IF NOT EXISTS agent_permissions (
 
 const IDEA_COLUMNS: &str = "id, title, short_notes, pain_addressed, target_keyword, pattern, tag, source, \
     channel_id, channel_name, scheduled_date, scheduled_time, offer_id, offer_name, suggested_draft, \
-    image_prompt, status, provider, created_at, sent_at, remote_id";
+    image_prompt, status, provider, created_at, sent_at, remote_id, publish_channels, published_at";
 
 /// Columns added after the first release; `migrate` adds any that are missing.
-const ADDED_IDEA_COLUMNS: [(&str, &str); 2] = [("sent_at", "INTEGER"), ("remote_id", "INTEGER")];
+const ADDED_IDEA_COLUMNS: [(&str, &str); 4] = [
+    ("sent_at", "INTEGER"),
+    ("remote_id", "INTEGER"),
+    ("publish_channels", "TEXT NOT NULL DEFAULT '[]'"),
+    ("published_at", "INTEGER"),
+];
+
+fn channels_json(channels: &[ChannelSchedule]) -> String {
+    serde_json::to_string(channels).unwrap_or_else(|_| "[]".into())
+}
 
 fn describe(error: rusqlite::Error) -> String {
     format!("The local database reported an error: {error}")
@@ -216,6 +246,8 @@ fn idea_from_row(row: &Row) -> rusqlite::Result<Idea> {
         created_at: row.get::<_, i64>(18)? as u64,
         sent_at: row.get::<_, Option<i64>>(19)?.map(|sent_at| sent_at as u64),
         remote_id: row.get(20)?,
+        publish_channels: serde_json::from_str(&row.get::<_, String>(21)?).unwrap_or_default(),
+        published_at: row.get::<_, Option<i64>>(22)?.map(|published_at| published_at as u64),
     })
 }
 
@@ -288,7 +320,7 @@ pub fn insert_ideas(conn: &mut Connection, ideas: &[Idea]) -> Result<(), String>
         let mut statement = transaction
             .prepare(&format!(
                 "INSERT OR IGNORE INTO ideas ({IDEA_COLUMNS}) VALUES \
-                 (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)"
+                 (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)"
             ))
             .map_err(describe)?;
         for idea in ideas {
@@ -315,6 +347,8 @@ pub fn insert_ideas(conn: &mut Connection, ideas: &[Idea]) -> Result<(), String>
                     idea.created_at as i64,
                     idea.sent_at.map(|sent_at| sent_at as i64),
                     idea.remote_id,
+                    channels_json(&idea.publish_channels),
+                    idea.published_at.map(|published_at| published_at as i64),
                 ])
                 .map_err(describe)?;
         }
@@ -334,7 +368,7 @@ pub fn update_idea(conn: &Connection, edit: &IdeaEdit) -> Result<Idea, String> {
     conn.execute(
         "UPDATE ideas SET title = ?2, short_notes = ?3, pain_addressed = ?4, target_keyword = ?5, \
          pattern = ?6, tag = ?7, channel_id = ?8, channel_name = ?9, suggested_draft = ?10, \
-         image_prompt = ?11 WHERE id = ?1",
+         image_prompt = ?11, publish_channels = ?12 WHERE id = ?1",
         params![
             edit.id,
             edit.title,
@@ -347,10 +381,31 @@ pub fn update_idea(conn: &Connection, edit: &IdeaEdit) -> Result<Idea, String> {
             edit.channel_name,
             edit.suggested_draft,
             edit.image_prompt,
+            channels_json(&edit.publish_channels),
         ],
     )
     .map_err(describe)?;
     get_idea(conn, &edit.id)
+}
+
+/// Records that the idea's post joined the main site's publish queue.
+pub fn mark_published(conn: &Connection, id: &str, published_at: u64) -> Result<Idea, String> {
+    conn.execute("UPDATE ideas SET published_at = ?2 WHERE id = ?1", params![id, published_at as i64])
+        .map_err(describe)?;
+    get_idea(conn, id)
+}
+
+/// Every writing pattern used by an idea, for the Write post page's picker.
+pub fn list_patterns(conn: &Connection) -> Result<Vec<String>, String> {
+    let mut statement = conn
+        .prepare("SELECT DISTINCT pattern FROM ideas WHERE pattern != '' ORDER BY pattern")
+        .map_err(describe)?;
+    let patterns = statement
+        .query_map([], |row| row.get(0))
+        .map_err(describe)?
+        .collect::<rusqlite::Result<Vec<String>>>()
+        .map_err(describe)?;
+    Ok(patterns)
 }
 
 /// Records that the idea now lives on the main site under `remote_id`.
@@ -538,11 +593,17 @@ mod tests {
                 channel_name: Some("X · account".into()),
                 suggested_draft: "New draft".into(),
                 image_prompt: None,
+                publish_channels: vec![ChannelSchedule {
+                    id: "linkedin_personal".into(),
+                    scheduled_date: Some("2026-12-01".into()),
+                    scheduled_time: Some("09:00".into()),
+                }],
             },
         )
         .unwrap();
 
         assert_eq!(edited.title, "Sharper hook");
+        assert_eq!(edited.publish_channels[0].scheduled_date.as_deref(), Some("2026-12-01"));
         assert_eq!(edited.channel_id.as_deref(), Some("x_profile"));
         assert_eq!(edited.suggested_draft, "New draft");
         assert_eq!(edited.image_prompt, None);
@@ -559,6 +620,21 @@ mod tests {
 
         assert_eq!((sent.sent_at, sent.remote_id), (Some(999), Some(42)));
         assert!(mark_sent(&conn, "missing", None, 1).unwrap_err().contains("no longer exists"));
+    }
+
+    #[test]
+    fn a_published_idea_remembers_when_and_patterns_are_listed_once() {
+        let mut conn = memory_db();
+        let mut b = planned("b", 1, None, "Sprint");
+        b.pattern = "Contrarian breakdown".into();
+        let mut c = planned("c", 1, None, "Sprint");
+        c.pattern = "Contrarian breakdown".into();
+        insert_ideas(&mut conn, &[planned("a", 1, None, "Sprint"), b, c]).unwrap();
+
+        let published = mark_published(&conn, "a", 500).unwrap();
+
+        assert_eq!(published.published_at, Some(500));
+        assert_eq!(list_patterns(&conn).unwrap(), ["Contrarian breakdown"]);
     }
 
     #[test]
@@ -581,6 +657,8 @@ mod tests {
         let ideas = list_ideas(&conn).unwrap();
         assert_eq!(ideas[0].title, "Old idea");
         assert_eq!(ideas[0].sent_at, None);
+        assert!(ideas[0].publish_channels.is_empty());
+        assert_eq!(ideas[0].published_at, None);
     }
 
     #[test]

@@ -17,9 +17,17 @@ export const DAY_NAMES = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"] as co
 const FULL_DAY_NAMES = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
+export const DEFAULT_POST_TIME = "09:00";
+
 /** Today in this computer's timezone, as "YYYY-MM-DD". Schedules are wall-clock times. */
 export function todayLocalDate() {
+  return localDateFromToday(0);
+}
+
+/** A date `daysAhead` days from today in this computer's timezone, as "YYYY-MM-DD". */
+export function localDateFromToday(daysAhead: number) {
   const date = new Date();
+  date.setDate(date.getDate() + daysAhead);
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
 }
 

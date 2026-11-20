@@ -87,6 +87,16 @@ export interface Idea {
   /** When the idea was last sent to the main site (ms since epoch), if ever. */
   sentAt: number | null;
   remoteId: number | null;
+  /** The channels picked on the Write post page, each with its schedule. */
+  publishChannels: ChannelSchedule[];
+  /** When the idea's post last joined the main site's publish queue (ms since epoch). */
+  publishedAt: number | null;
+}
+
+export interface ChannelSchedule {
+  id: string;
+  scheduledDate: string | null;
+  scheduledTime: string | null;
 }
 
 /** The fields the idea page can change. */
@@ -103,7 +113,46 @@ export type IdeaEdit = Pick<
   | "channelName"
   | "suggestedDraft"
   | "imagePrompt"
+  | "publishChannels"
 >;
+
+/** A connected account on the main site a post can go out on. */
+export interface ComposerChannel {
+  id: string;
+  platform: string;
+  name: string;
+  handleOrSub: string;
+  avatarUrl: string | null;
+}
+
+/** The main site's copy of a sent idea, as its Write post page shows it. */
+export interface RemoteComposer {
+  idea: {
+    id: number;
+    title: string;
+    shortNotes: string | null;
+    painAddressed: string | null;
+    targetKeyword: string | null;
+    pattern: string | null;
+    tag: string | null;
+    source: string;
+    provider: string | null;
+    offerName: string | null;
+    plannedDate: string | null;
+    plannedTime: string | null;
+    suggestedDraft: string | null;
+    imagePrompt: string | null;
+    publishStatus: "Draft" | "Sent" | null;
+  };
+  channels: ComposerChannel[];
+  posts: { channelId: string; text: string; pattern: string | null; status: string; scheduledDate: string | null; scheduledTime: string | null }[];
+}
+
+export interface BulkIdeaSchedule {
+  id: string;
+  scheduledDate: string;
+  scheduledTime: string;
+}
 
 export interface PlanSlot {
   channelId: string;
@@ -249,6 +298,11 @@ export const api = {
   revokePermission: (provider: string, tool: string) => invoke<void>("revoke_permission", { provider, tool }),
   updateIdea: (idea: IdeaEdit) => invoke<Idea>("update_idea", { idea }),
   sendIdea: (id: string) => invoke<Idea>("send_idea", { id }),
+  publishIdea: (id: string) => invoke<Idea>("publish_idea", { id }),
+  publishIdeas: (ideas: BulkIdeaSchedule[], channels: string[]) => invoke<Idea[]>("publish_ideas", { ideas, channels }),
+  listChannels: () => invoke<{ channels: ComposerChannel[] }>("list_channels"),
+  getRemoteIdea: (remoteId: number) => invoke<RemoteComposer>("get_remote_idea", { remoteId }),
+  listPatterns: () => invoke<string[]>("list_patterns"),
   cancelPlan: () => invoke<void>("cancel_plan"),
   getSession: () => invoke<Session | null>("get_session"),
   login: (baseUrl: string, token: string) => invoke<Session>("login", { baseUrl, token }),
