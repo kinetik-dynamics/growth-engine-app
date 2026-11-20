@@ -247,6 +247,10 @@ async fn upload_idea(app: &AppHandle, config: &Config, id: &str) -> Result<Idea,
         "pattern": blank(&idea.pattern),
         "tag": blank(&idea.tag),
         "target_channel_id": idea.channel_id,
+        "target_channel_name": idea.channel_name,
+        "target_platform": idea.channel_platform,
+        "topic_title": idea.topic_title,
+        "topic_description": idea.topic_description,
         "suggested_draft": blank(&idea.suggested_draft),
         "image_prompt": idea.image_prompt,
         "provider": idea.provider,
@@ -256,6 +260,10 @@ async fn upload_idea(app: &AppHandle, config: &Config, id: &str) -> Result<Idea,
     let response = api::post(&config.session.base_url, &config.token, "/api/ideas", &body).await?;
 
     db::mark_sent(&store::database(app)?, id, response["idea"]["id"].as_i64(), now_ms())
+}
+
+fn non_empty(value: &str) -> Option<String> {
+    (!value.is_empty()).then(|| value.to_string())
 }
 
 fn remote_id_of(idea: &Idea) -> Result<i64, String> {
@@ -391,7 +399,20 @@ async fn generate_plan(app: AppHandle, request: plan::PlanRequest) -> Result<Pla
         let conn = store::database(&app)?;
         (db::recent_idea_titles(&conn, 40)?, db::allowed_tools(&conn, &request.provider)?)
     };
-    let prompt = plan::build_prompt(&skill, &company, &offer, &request.slots, request.with_images, &existing_titles);
+    let topic = request.topic();
+    let prompt = plan::build_prompt(
+        &skill,
+        &company,
+        &offer,
+        &request.slots,
+        topic.as_ref(),
+        request.with_images,
+        &existing_titles,
+    );
+    let (topic_title, topic_description) = match &topic {
+        Some(topic) => (non_empty(topic.title), non_empty(topic.description)),
+        None => (None, None),
+    };
     report(
         &app,
         "stage",
@@ -446,6 +467,9 @@ async fn generate_plan(app: AppHandle, request: plan::PlanRequest) -> Result<Pla
             source: "Agent plan".into(),
             channel_id: Some(slot.channel_id.clone()),
             channel_name: Some(slot.channel_name.clone()),
+            channel_platform: Some(slot.platform.clone()),
+            topic_title: topic_title.clone(),
+            topic_description: topic_description.clone(),
             offer_id: Some(request.offer_id),
             offer_name: offer_name.clone(),
             suggested_draft: idea.draft,

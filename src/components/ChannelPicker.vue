@@ -3,7 +3,8 @@ import type { ComposerChannel } from "../api";
 import ChannelAvatar from "./ChannelAvatar.vue";
 import Icon from "./Icon.vue";
 
-defineProps<{ channels: ComposerChannel[]; selectedIds: string[] }>();
+/** `plannedPlatform` marks the channels matching the platform the idea was written for. */
+defineProps<{ channels: ComposerChannel[]; selectedIds: string[]; plannedPlatform?: string }>();
 const emit = defineEmits<{ toggle: [id: string]; connect: [] }>();
 </script>
 
@@ -25,7 +26,9 @@ const emit = defineEmits<{ toggle: [id: string]; connect: [] }>();
     >
       <ChannelAvatar :channel="channel" />
       <span class="cp-text">
-        <span class="cp-name">{{ channel.name }}</span>
+        <span class="cp-name">
+          {{ channel.name }}<span v-if="plannedPlatform && channel.platform === plannedPlatform" class="cp-planned">Planned</span>
+        </span>
         <span class="cp-handle">{{ channel.handleOrSub }}</span>
       </span>
       <span class="cp-check"><Icon name="check" :size="12" :stroke="3" /></span>

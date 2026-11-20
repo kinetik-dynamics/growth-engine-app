@@ -27,6 +27,15 @@ pub struct Idea {
     pub channel_id: Option<String>,
     #[serde(default)]
     pub channel_name: Option<String>,
+    /// The platform the idea was planned for (LinkedIn, Facebook, X or
+    /// Website). Kept as planned when the post goes out on other channels.
+    #[serde(default)]
+    pub channel_platform: Option<String>,
+    /// The topic the plan was focused on, if the user gave one.
+    #[serde(default)]
+    pub topic_title: Option<String>,
+    #[serde(default)]
+    pub topic_description: Option<String>,
     #[serde(default)]
     pub scheduled_date: Option<String>,
     #[serde(default)]
@@ -102,6 +111,9 @@ impl Idea {
             source: "Manual".into(),
             channel_id: None,
             channel_name: None,
+            channel_platform: None,
+            topic_title: None,
+            topic_description: None,
             scheduled_date: None,
             scheduled_time: None,
             offer_id: None,
@@ -183,15 +195,28 @@ CREATE TABLE IF NOT EXISTS agent_permissions (
 
 const IDEA_COLUMNS: &str = "id, title, short_notes, pain_addressed, target_keyword, pattern, tag, source, \
     channel_id, channel_name, scheduled_date, scheduled_time, offer_id, offer_name, suggested_draft, \
-    image_prompt, status, provider, created_at, sent_at, remote_id, publish_channels, published_at";
+    image_prompt, status, provider, created_at, sent_at, remote_id, publish_channels, published_at, \
+    channel_platform, topic_title, topic_description";
 
 /// Columns added after the first release; `migrate` adds any that are missing.
-const ADDED_IDEA_COLUMNS: [(&str, &str); 4] = [
+const ADDED_IDEA_COLUMNS: [(&str, &str); 7] = [
     ("sent_at", "INTEGER"),
     ("remote_id", "INTEGER"),
     ("publish_channels", "TEXT NOT NULL DEFAULT '[]'"),
     ("published_at", "INTEGER"),
+    ("channel_platform", "TEXT"),
+    ("topic_title", "TEXT"),
+    ("topic_description", "TEXT"),
 ];
+
+/// Ideas planned before `channel_platform` existed still carry the
+/// planner's channel id, which names the platform.
+const BACKFILL_CHANNEL_PLATFORM: &str = "UPDATE ideas SET channel_platform = CASE \
+    WHEN channel_id LIKE 'linkedin%' THEN 'LinkedIn' \
+    WHEN channel_id LIKE 'facebook%' THEN 'Facebook' \
+    WHEN substr(channel_id, 1, 2) = 'x_' THEN 'X' \
+    WHEN channel_id LIKE 'website%' THEN 'Website' END \
+    WHERE channel_platform IS NULL AND channel_id IS NOT NULL";
 
 fn channels_json(channels: &[ChannelSchedule]) -> String {
     serde_json::to_string(channels).unwrap_or_else(|_| "[]".into())
@@ -210,6 +235,9 @@ fn migrate(conn: &Connection) -> Result<(), String> {
             .map_err(describe)?;
         if !exists {
             conn.execute_batch(&format!("ALTER TABLE ideas ADD COLUMN {column} {kind}")).map_err(describe)?;
+            if column == "channel_platform" {
+                conn.execute_batch(BACKFILL_CHANNEL_PLATFORM).map_err(describe)?;
+            }
         }
     }
     Ok(())
@@ -248,6 +276,9 @@ fn idea_from_row(row: &Row) -> rusqlite::Result<Idea> {
         remote_id: row.get(20)?,
         publish_channels: serde_json::from_str(&row.get::<_, String>(21)?).unwrap_or_default(),
         published_at: row.get::<_, Option<i64>>(22)?.map(|published_at| published_at as u64),
+        channel_platform: row.get(23)?,
+        topic_title: row.get(24)?,
+        topic_description: row.get(25)?,
     })
 }
 
@@ -320,7 +351,7 @@ pub fn insert_ideas(conn: &mut Connection, ideas: &[Idea]) -> Result<(), String>
         let mut statement = transaction
             .prepare(&format!(
                 "INSERT OR IGNORE INTO ideas ({IDEA_COLUMNS}) VALUES \
-                 (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)"
+                 (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26)"
             ))
             .map_err(describe)?;
         for idea in ideas {
@@ -349,6 +380,9 @@ pub fn insert_ideas(conn: &mut Connection, ideas: &[Idea]) -> Result<(), String>
                     idea.remote_id,
                     channels_json(&idea.publish_channels),
                     idea.published_at.map(|published_at| published_at as i64),
+                    idea.channel_platform,
+                    idea.topic_title,
+                    idea.topic_description,
                 ])
                 .map_err(describe)?;
         }
@@ -659,6 +693,36 @@ mod tests {
         assert_eq!(ideas[0].sent_at, None);
         assert!(ideas[0].publish_channels.is_empty());
         assert_eq!(ideas[0].published_at, None);
+        assert_eq!(ideas[0].channel_platform, None);
+        assert_eq!(ideas[0].topic_title, None);
+    }
+
+    #[test]
+    fn planned_ideas_from_before_the_platform_column_get_their_platform() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE ideas (id TEXT PRIMARY KEY, title TEXT NOT NULL, short_notes TEXT NOT NULL DEFAULT '', \
+             pain_addressed TEXT NOT NULL DEFAULT '', target_keyword TEXT NOT NULL DEFAULT '', \
+             pattern TEXT NOT NULL DEFAULT '', tag TEXT NOT NULL DEFAULT '', source TEXT NOT NULL, \
+             channel_id TEXT, channel_name TEXT, scheduled_date TEXT, scheduled_time TEXT, offer_id INTEGER, \
+             offer_name TEXT, suggested_draft TEXT NOT NULL DEFAULT '', image_prompt TEXT, \
+             status TEXT NOT NULL DEFAULT 'draft', provider TEXT, created_at INTEGER NOT NULL);
+             INSERT INTO ideas (id, title, source, channel_id, created_at) VALUES
+                 ('li', 'A', 'Agent plan', 'linkedin_personal', 4),
+                 ('fb', 'B', 'Agent plan', 'facebook_page', 3),
+                 ('x', 'C', 'Agent plan', 'x_profile', 2),
+                 ('web', 'D', 'Agent plan', 'website_blog', 1),
+                 ('real', 'E', 'Agent plan', '42', 0);",
+        )
+        .unwrap();
+
+        migrate(&conn).unwrap();
+
+        let platforms: Vec<Option<String>> = list_ideas(&conn).unwrap().into_iter().map(|idea| idea.channel_platform).collect();
+        assert_eq!(
+            platforms,
+            [Some("LinkedIn".into()), Some("Facebook".into()), Some("X".into()), Some("Website".into()), None]
+        );
     }
 
     #[test]

@@ -18,6 +18,26 @@ pub struct PlanRequest {
     pub offer_id: i64,
     pub slots: Vec<Slot>,
     pub with_images: bool,
+    /// The topic every idea should be about. Blank lets the agent pick
+    /// angles from the offer alone.
+    #[serde(default)]
+    pub topic_title: Option<String>,
+    #[serde(default)]
+    pub topic_description: Option<String>,
+}
+
+/// The plan's topic, if the user gave one.
+pub struct Topic<'a> {
+    pub title: &'a str,
+    pub description: &'a str,
+}
+
+impl PlanRequest {
+    pub fn topic(&self) -> Option<Topic<'_>> {
+        let title = self.topic_title.as_deref().map(str::trim).unwrap_or_default();
+        let description = self.topic_description.as_deref().map(str::trim).unwrap_or_default();
+        (!title.is_empty() || !description.is_empty()).then_some(Topic { title, description })
+    }
 }
 
 /// One idea as the AI returns it.
@@ -39,6 +59,7 @@ pub fn build_prompt(
     company: &Value,
     offer: &Value,
     slots: &[Slot],
+    topic: Option<&Topic>,
     with_images: bool,
     existing_titles: &[String],
 ) -> String {
@@ -56,6 +77,17 @@ pub fn build_prompt(
 
     prompt.push_str("\n\n# Focus offer (primary CTA and case angle)\n\n");
     prompt.push_str(&serde_json::to_string_pretty(offer).unwrap_or_default());
+
+    if let Some(topic) = topic {
+        prompt.push_str("\n\n# Topic for this week (every idea must be about it)\n\n");
+        if !topic.title.is_empty() {
+            prompt.push_str(&format!("Title: {}\n", topic.title));
+        }
+        if !topic.description.is_empty() {
+            prompt.push_str(&format!("Description: {}\n", topic.description));
+        }
+        prompt.push_str("Tie each idea to this topic while still selling the focus offer.");
+    }
 
     prompt.push_str("\n\n# Slots to fill\n\nWrite exactly one idea per slot, in this order:\n");
     for (index, slot) in slots.iter().enumerate() {
@@ -148,13 +180,33 @@ mod tests {
         }];
         let offer = serde_json::json!({ "name": "AI Automation Sprint" });
 
-        let text_only = build_prompt("SKILL", &Value::Null, &offer, &slots, false, &[]);
-        let with_images = build_prompt("SKILL", &Value::Null, &offer, &slots, true, &["Old idea".into()]);
+        let text_only = build_prompt("SKILL", &Value::Null, &offer, &slots, None, false, &[]);
+        let with_images = build_prompt("SKILL", &Value::Null, &offer, &slots, None, true, &["Old idea".into()]);
 
         assert!(text_only.contains("1. X · account (X)\n"));
         assert!(text_only.contains("AI Automation Sprint"));
         assert!(!text_only.contains("image_prompt"));
         assert!(with_images.contains("image_prompt"));
         assert!(with_images.contains("- Old idea"));
+        assert!(!text_only.contains("# Topic"));
+    }
+
+    #[test]
+    fn prompt_includes_the_topic_when_given_and_blank_topics_are_ignored() {
+        let request = |title: &str, description: &str| PlanRequest {
+            provider: "claude".into(),
+            offer_id: 1,
+            slots: Vec::new(),
+            with_images: false,
+            topic_title: Some(title.into()),
+            topic_description: Some(description.into()),
+        };
+        assert!(request("  ", "").topic().is_none());
+
+        let focused = request(" Black Friday prep ", "Scaling stores for traffic spikes");
+        let prompt = build_prompt("SKILL", &Value::Null, &Value::Null, &[], focused.topic().as_ref(), false, &[]);
+
+        assert!(prompt.contains("Title: Black Friday prep\n"));
+        assert!(prompt.contains("Description: Scaling stores for traffic spikes\n"));
     }
 }

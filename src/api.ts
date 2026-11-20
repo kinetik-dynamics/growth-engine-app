@@ -76,6 +76,11 @@ export interface Idea {
   source: string;
   channelId: string | null;
   channelName: string | null;
+  /** The platform the idea was planned for: LinkedIn, Facebook, X or Website. */
+  channelPlatform: string | null;
+  /** The topic the plan was focused on, if one was given. */
+  topicTitle: string | null;
+  topicDescription: string | null;
   scheduledDate: string | null;
   scheduledTime: string | null;
   offerName: string | null;
@@ -165,6 +170,8 @@ export interface PlanRequest {
   offerId: number;
   slots: PlanSlot[];
   withImages: boolean;
+  topicTitle: string;
+  topicDescription: string;
 }
 
 export interface OfferIdeaCount {

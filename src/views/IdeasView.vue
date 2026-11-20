@@ -3,6 +3,8 @@ import { computed, onMounted, ref } from "vue";
 import { api, errorMessage, type Idea, type IdeaTab, type Session } from "../api";
 import Icon from "../components/Icon.vue";
 import Pagination from "../components/Pagination.vue";
+import PlatformIcon from "../components/PlatformIcon.vue";
+import { plannedChannel } from "../channels";
 import PlanWeekView from "./PlanWeekView.vue";
 import IdeaDetailView from "./IdeaDetailView.vue";
 import BulkPublishView from "./BulkPublishView.vue";
@@ -157,6 +159,12 @@ function publishState(idea: Idea): "Sent" | "Draft" | null {
   return null;
 }
 
+/** Colours the card with the platform the idea was planned for. */
+function channelStyle(idea: Idea) {
+  const channel = plannedChannel(idea);
+  return channel ? { "--ch": channel.color, "--ch-soft": channel.soft } : undefined;
+}
+
 function actionLabel(idea: Idea) {
   const state = publishState(idea);
   return state === "Sent" ? "Edit post" : state === "Draft" ? "Continue draft" : "Write post";
@@ -247,7 +255,13 @@ function actionLabel(idea: Idea) {
       </div>
 
       <div v-else class="iv-grid" :aria-busy="loading">
-        <article v-for="idea in ideas" :key="idea.id" class="iv-card" :class="{ picked: picked.has(idea.id) }">
+        <article
+          v-for="idea in ideas"
+          :key="idea.id"
+          class="iv-card"
+          :class="{ picked: picked.has(idea.id), 'has-channel': plannedChannel(idea) }"
+          :style="channelStyle(idea)"
+        >
           <div class="iv-card-body">
             <div class="iv-card-top">
               <label class="iv-source">
@@ -265,6 +279,11 @@ function actionLabel(idea: Idea) {
                 <span v-if="idea.tag" class="iv-tag">{{ idea.tag }}</span>
               </div>
             </div>
+            <span v-if="plannedChannel(idea)" class="ch-chip" :title="`Planned for ${plannedChannel(idea)?.name}`">
+              <PlatformIcon :platform="plannedChannel(idea)?.platform" size="sm" />
+              <b>{{ plannedChannel(idea)?.platform }}</b>
+              <span v-if="plannedChannel(idea)?.account" class="ch-account">{{ plannedChannel(idea)?.account }}</span>
+            </span>
             <h3 class="iv-title">{{ idea.title }}</h3>
             <p v-if="idea.shortNotes" class="iv-notes">{{ idea.shortNotes }}</p>
             <div class="iv-meta">
@@ -272,6 +291,9 @@ function actionLabel(idea: Idea) {
               <div v-if="idea.pattern"><b>Pattern:</b> {{ idea.pattern }}</div>
               <div v-if="idea.targetKeyword" class="iv-truncate"><b>Keyword:</b> {{ idea.targetKeyword }}</div>
               <div v-if="idea.offerName" class="iv-truncate"><b>Offer:</b> {{ idea.offerName }}</div>
+            </div>
+            <div v-if="idea.topicTitle" class="iv-topic" :title="idea.topicDescription || idea.topicTitle">
+              <Icon name="hash" :size="12" /><span>{{ idea.topicTitle }}</span>
             </div>
           </div>
           <div class="iv-card-foot">

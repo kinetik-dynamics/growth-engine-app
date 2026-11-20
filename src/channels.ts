@@ -46,3 +46,26 @@ export function slotsFor(channels: Channel[], counts: Record<string, number>): P
     })),
   );
 }
+
+export type Platform = Channel["platform"];
+
+/** Brand colour and short label of each platform, as the web app shows them. */
+export const PLATFORM_LOOK: Record<Platform, { color: string; soft: string; label: string }> = {
+  LinkedIn: { color: "#0a66c2", soft: "#eff6ff", label: "LinkedIn" },
+  Facebook: { color: "#1877f2", soft: "#eff6ff", label: "Facebook" },
+  X: { color: "#111827", soft: "#f3f4f6", label: "X" },
+  Website: { color: "#047857", soft: "#ecfdf5", label: "Website" },
+};
+
+export function isPlatform(value: string | null | undefined): value is Platform {
+  return !!value && value in PLATFORM_LOOK;
+}
+
+/** The channel an idea was planned for, or null for ideas typed by hand. */
+export function plannedChannel(idea: { channelPlatform: string | null; channelName: string | null }) {
+  if (!isPlatform(idea.channelPlatform)) return null;
+  const name = idea.channelName ?? idea.channelPlatform;
+  /** "Personal profile" out of "LinkedIn · Personal profile". */
+  const account = name.includes(" · ") ? name.split(" · ").slice(1).join(" · ") : "";
+  return { platform: idea.channelPlatform, name, account, ...PLATFORM_LOOK[idea.channelPlatform] };
+}

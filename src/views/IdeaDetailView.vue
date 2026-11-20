@@ -9,6 +9,8 @@ import SectionCard from "../components/SectionCard.vue";
 import ChannelPicker from "../components/ChannelPicker.vue";
 import ChannelAvatar from "../components/ChannelAvatar.vue";
 import FormatToolbar from "../components/FormatToolbar.vue";
+import PlatformIcon from "../components/PlatformIcon.vue";
+import { plannedChannel } from "../channels";
 
 const props = defineProps<{ idea: Idea; session: Session }>();
 const emit = defineEmits<{ close: []; saved: [idea: Idea]; deleted: [] }>();
@@ -58,6 +60,10 @@ function scheduleFor(id: string): Schedule {
   if (!schedules[id]) schedules[id] = defaultSchedule();
   return schedules[id];
 }
+
+/** The channel the agent wrote this idea for; it stays fixed whatever channels the post goes out on. */
+const planned = computed(() => plannedChannel(current.value));
+const plannedStyle = computed(() => (planned.value ? { "--ch": planned.value.color, "--ch-soft": planned.value.soft } : undefined));
 
 const selectedChannels = computed(() => channels.value.filter((channel) => selectedIds.value.includes(channel.id)));
 const previewChannel = computed(
@@ -147,7 +153,10 @@ async function load() {
     }
 
     if (!selectedIds.value.length) {
-      const target = channels.value.find((channel) => channel.id === current.value.channelId) ?? channels.value[0];
+      const target =
+        channels.value.find((channel) => channel.id === current.value.channelId) ??
+        channels.value.find((channel) => channel.platform === planned.value?.platform) ??
+        channels.value[0];
       if (target) selectedIds.value = [target.id];
     }
     selectedIds.value = selectedIds.value.filter((id) => channels.value.some((channel) => channel.id === id));
@@ -167,7 +176,6 @@ async function load() {
 onMounted(load);
 
 function edit(): IdeaEdit {
-  const first = selectedChannels.value[0];
   return {
     id: current.value.id,
     title: details.title.trim(),
@@ -176,8 +184,9 @@ function edit(): IdeaEdit {
     targetKeyword: details.targetKeyword,
     pattern: pattern.value,
     tag: details.tag,
-    channelId: first?.id ?? current.value.channelId,
-    channelName: first?.name ?? current.value.channelName,
+    // The planned channel is kept; the picked ones live in publishChannels.
+    channelId: current.value.channelId,
+    channelName: current.value.channelName,
     suggestedDraft: text.value,
     imagePrompt: details.imagePrompt.trim() || null,
     publishChannels: selectedChannels.value.map((channel) => ({
@@ -266,6 +275,11 @@ function openConnections() {
           <div class="wp-title-row">
             <h1>Write post</h1>
             <span class="wp-status" :class="`wp-status-${status.tone}`">{{ status.label }}</span>
+            <span v-if="planned" class="ch-chip" :title="`Planned for ${planned.name}`">
+              <PlatformIcon :platform="planned.platform" size="sm" />
+              <b>{{ planned.platform }}</b>
+              <span v-if="planned.account" class="ch-account">{{ planned.account }}</span>
+            </span>
           </div>
           <p class="wp-subtitle">{{ details.title }}</p>
         </div>
@@ -311,6 +325,19 @@ function openConnections() {
 
           <SectionCard icon="lightbulb" title="Idea details" hint="The hook, angle and audience this post is written from.">
             <div class="wp-details">
+              <div v-if="planned || current.topicTitle" class="wp-planned" :style="plannedStyle ?? { '--ch': '#9ca3af', '--ch-soft': '#f9fafb' }">
+                <span v-if="planned" class="wp-planned-icon"><PlatformIcon :platform="planned.platform" /></span>
+                <span v-else class="wp-planned-icon"><Icon name="hash" :size="14" /></span>
+                <div class="wp-planned-text">
+                  <span v-if="planned" class="wp-planned-label">Written for</span>
+                  <span v-if="planned" class="wp-planned-name">
+                    <b>{{ planned.platform }}</b><template v-if="planned.account"> · {{ planned.account }}</template>
+                  </span>
+                  <span v-if="current.topicTitle" class="wp-planned-topic">
+                    Topic: <b>{{ current.topicTitle }}</b><template v-if="current.topicDescription"> · {{ current.topicDescription }}</template>
+                  </span>
+                </div>
+              </div>
               <label class="wp-field">
                 <span>Title / hook</span>
                 <textarea v-model="details.title" rows="2" class="wp-input"></textarea>
@@ -358,7 +385,7 @@ function openConnections() {
 
           <SectionCard icon="share" title="Publish to" hint="Pick one or more of your connected channels.">
             <div v-if="loading" class="skeleton" style="height: 64px"></div>
-            <ChannelPicker v-else :channels="channels" :selected-ids="selectedIds" @toggle="toggleChannel" @connect="openConnections" />
+            <ChannelPicker v-else :channels="channels" :selected-ids="selectedIds" :planned-platform="planned?.platform" @toggle="toggleChannel" @connect="openConnections" />
           </SectionCard>
 
           <SectionCard icon="layers" title="Pattern" hint="The writing structure this post follows.">

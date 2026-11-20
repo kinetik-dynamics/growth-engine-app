@@ -12,14 +12,20 @@ import {
   type PlanProgress,
 } from "../api";
 import { channelsFor, MAX_POSTS_PER_CHANNEL, nextMonday, slotsFor, weekLabel } from "../channels";
+import Icon from "../components/Icon.vue";
+import PlatformIcon from "../components/PlatformIcon.vue";
+import SectionCard from "../components/SectionCard.vue";
 
 const props = defineProps<{ websiteUrl: string | null }>();
 const emit = defineEmits<{ close: []; generated: [ideas: Idea[], requested: number]; openSettings: [] }>();
 
 const STEPS = ["Posts per channel", "Creation mode", "Images"];
+const TOPIC_TITLE_MAX = 120;
+const TOPIC_DESCRIPTION_MAX = 600;
 
 const channels = channelsFor(props.websiteUrl);
 const monday = nextMonday();
+const week = weekLabel(monday);
 
 const step = ref(1);
 const loading = ref(true);
@@ -35,6 +41,8 @@ const ideaCounts = ref<OfferIdeaCount[]>([]);
 const clis = ref<CliStatus[]>([]);
 
 const counts = reactive<Record<string, number>>(Object.fromEntries(channels.map((c) => [c.id, c.defaultCount])));
+const topicTitle = ref("");
+const topicDescription = ref("");
 const offerSearch = ref("");
 /** Kept as a whole offer so the pick survives searching and paging. */
 const offer = ref<Offer | null>(null);
@@ -64,11 +72,19 @@ const elapsedLabel = computed(() => {
   const minutes = Math.floor(elapsed.value / 60);
   return `${minutes}:${String(elapsed.value % 60).padStart(2, "0")}`;
 });
+const hasTopic = computed(() => topicTitle.value.trim() !== "" || topicDescription.value.trim() !== "");
 
 const canContinue = computed(() => {
   if (step.value === 1) return total.value > 0 && offerId.value !== null;
   if (step.value === 2) return mode.value === "ai" && provider.value !== "";
   return true;
+});
+/** Why Next is disabled, so the footer can say it instead of leaving the user guessing. */
+const blocker = computed(() => {
+  if (loading.value || canContinue.value) return "";
+  if (step.value === 1) return total.value === 0 ? "Add at least one post to a channel." : "Pick a focus offer.";
+  if (step.value === 2) return "Pick an AI agent to write the ideas.";
+  return "";
 });
 
 onMounted(async () => {
@@ -137,6 +153,18 @@ function next() {
   step.value++;
 }
 
+function back() {
+  error.value = "";
+  step.value--;
+}
+
+/** Steps already passed can be revisited from the step bar. */
+function goToStep(target: number) {
+  if (generating.value || target >= step.value) return;
+  error.value = "";
+  step.value = target;
+}
+
 async function generate() {
   if (offerId.value === null) return;
   error.value = "";
@@ -154,6 +182,8 @@ async function generate() {
       offerId: offerId.value,
       slots,
       withImages: withImages.value,
+      topicTitle: topicTitle.value.trim(),
+      topicDescription: topicDescription.value.trim(),
     });
     if (outcome.kind === "created") {
       emit("generated", outcome.ideas, slots.length);
@@ -185,214 +215,367 @@ async function allowAndRetry() {
 </script>
 
 <template>
-  <header class="page-head">
-    <div>
-      <div class="row" style="gap: 8px">
-        <span class="badge badge-primary">EDITORIAL AGENT</span>
-        <h1>Plan next week's ideas</h1>
+  <div class="wp pw">
+    <div class="wp-header">
+      <div class="wp-header-left">
+        <button class="wp-back" title="Back to Ideas" aria-label="Back to Ideas" :disabled="generating" @click="emit('close')">
+          <Icon name="arrowLeft" />
+        </button>
+        <div style="min-width: 0">
+          <div class="wp-title-row">
+            <h1>Plan next week</h1>
+            <span class="pw-agent-badge"><Icon name="sparkles" :size="11" /> Editorial agent</span>
+          </div>
+          <p class="wp-subtitle">{{ week }} · Your AI agent drafts one idea per post, based on the offer you pick.</p>
+        </div>
       </div>
-      <p class="muted small">Your AI agent drafts one idea per post, based on the offer you pick.</p>
-    </div>
-    <button class="btn" :disabled="generating" @click="emit('close')">Back to ideas</button>
-  </header>
-
-  <div class="steps">
-    <template v-for="(label, index) in STEPS" :key="label">
-      <div class="step" :class="{ current: step === index + 1, done: step > index + 1 }">
-        <span class="step-num">{{ step > index + 1 ? "✓" : index + 1 }}</span>
-        {{ label }}
-      </div>
-      <span v-if="index < STEPS.length - 1" class="step-line"></span>
-    </template>
-  </div>
-
-  <div class="page-body plan-body">
-    <div v-if="loading" class="stack" aria-busy="true">
-      <div class="skeleton" style="height: 48px"></div>
-      <div class="skeleton" style="height: 48px"></div>
-      <div class="skeleton" style="height: 160px"></div>
     </div>
 
-    <!-- 1. Posts per channel -->
-    <template v-else-if="step === 1">
-      <h2>Target posts per channel for next week ({{ weekLabel(monday) }})</h2>
-      <div class="channel-grid">
-        <div v-for="channel in channels" :key="channel.id" class="channel-row">
-          <div class="row" style="gap: 8px">
-            <span class="dot" :style="{ background: channel.color }"></span>
-            <span style="font-weight: 600">{{ channel.name }}</span>
-          </div>
-          <div class="stepper">
-            <button type="button" :disabled="counts[channel.id] === 0" :aria-label="`Fewer ${channel.name} posts`" @click="counts[channel.id]--">−</button>
-            <output>{{ counts[channel.id] }}</output>
-            <button type="button" :disabled="counts[channel.id] >= MAX_POSTS_PER_CHANNEL" :aria-label="`More ${channel.name} posts`" @click="counts[channel.id]++">+</button>
-          </div>
-        </div>
-      </div>
+    <nav class="pw-steps" aria-label="Plan steps">
+      <template v-for="(label, index) in STEPS" :key="label">
+        <button
+          type="button"
+          class="pw-step"
+          :class="{ current: step === index + 1, done: step > index + 1 }"
+          :aria-current="step === index + 1 ? 'step' : undefined"
+          :disabled="generating || step <= index + 1"
+          @click="goToStep(index + 1)"
+        >
+          <span class="pw-step-num">
+            <Icon v-if="step > index + 1" name="check" :size="12" :stroke="3" />
+            <template v-else>{{ index + 1 }}</template>
+          </span>
+          {{ label }}
+        </button>
+        <span v-if="index < STEPS.length - 1" class="pw-step-line" :class="{ done: step > index + 1 }"></span>
+      </template>
+    </nav>
 
-      <div class="field">
-        <label for="offer-search">Focus offer (primary CTA and case angle)</label>
-        <template v-if="hasOffers">
-          <input id="offer-search" v-model="offerSearch" class="input" type="search" placeholder="Search offers by name or promise" />
-          <div class="offer-list" role="radiogroup" aria-label="Focus offer" :aria-busy="offersLoading">
-            <button
-              v-for="item in offers"
-              :key="item.id"
-              type="button"
-              class="offer-option"
-              :class="{ selected: offerId === item.id }"
-              role="radio"
-              :aria-checked="offerId === item.id"
-              @click="offer = item"
+    <div class="wp-layout">
+      <main class="wp-main">
+        <div class="wp-column">
+          <div v-if="error" class="wp-alert wp-alert-error" role="alert">
+            <Icon name="alertCircle" :size="16" />
+            <span style="white-space: pre-wrap; word-break: break-word">{{ error }}</span>
+          </div>
+
+          <div v-if="loading" class="pw-skeletons" aria-busy="true">
+            <div class="skeleton" style="height: 150px"></div>
+            <div class="skeleton" style="height: 170px"></div>
+            <div class="skeleton" style="height: 260px"></div>
+          </div>
+
+          <!-- 1. Topic, posts per channel and focus offer -->
+          <template v-else-if="step === 1">
+            <SectionCard icon="hash" title="Topic" hint="Optional. What should next week's ideas be about?">
+              <div class="wp-details">
+                <label class="wp-field">
+                  <span class="pw-label-row">
+                    Topic title
+                    <span class="pw-count">{{ topicTitle.length }}/{{ TOPIC_TITLE_MAX }}</span>
+                  </span>
+                  <input
+                    v-model="topicTitle"
+                    class="wp-input"
+                    :maxlength="TOPIC_TITLE_MAX"
+                    placeholder="e.g. Getting e-commerce stores ready for Black Friday traffic"
+                  />
+                </label>
+                <label class="wp-field">
+                  <span class="pw-label-row">
+                    Topic description
+                    <span class="pw-count">{{ topicDescription.length }}/{{ TOPIC_DESCRIPTION_MAX }}</span>
+                  </span>
+                  <textarea
+                    v-model="topicDescription"
+                    rows="3"
+                    class="wp-input"
+                    :maxlength="TOPIC_DESCRIPTION_MAX"
+                    placeholder="The angle, audience or points the agent should cover. Leave blank to let it pick angles from the offer."
+                  ></textarea>
+                </label>
+              </div>
+            </SectionCard>
+
+            <SectionCard icon="share" title="Posts per channel" hint="How many ideas to draft for each channel next week.">
+              <template #action>
+                <span class="pw-total">{{ total }} {{ total === 1 ? "post" : "posts" }}</span>
+              </template>
+              <div class="pw-channels">
+                <div
+                  v-for="channel in channels"
+                  :key="channel.id"
+                  class="pw-channel"
+                  :class="{ active: counts[channel.id] > 0 }"
+                  :style="{ '--ch': channel.color }"
+                >
+                  <PlatformIcon :platform="channel.platform" />
+                  <span class="pw-channel-text">
+                    <span class="pw-channel-name">{{ channel.platform }}</span>
+                    <span class="pw-channel-sub">{{ channel.name.split(" · ")[1] ?? channel.name }}</span>
+                  </span>
+                  <div class="pw-stepper">
+                    <button
+                      type="button"
+                      :disabled="counts[channel.id] === 0"
+                      :aria-label="`Fewer ${channel.name} posts`"
+                      @click="counts[channel.id]--"
+                    >
+                      −
+                    </button>
+                    <output :aria-label="`${channel.name} posts`">{{ counts[channel.id] }}</output>
+                    <button
+                      type="button"
+                      :disabled="counts[channel.id] >= MAX_POSTS_PER_CHANNEL"
+                      :aria-label="`More ${channel.name} posts`"
+                      @click="counts[channel.id]++"
+                    >
+                      +
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </SectionCard>
+
+            <SectionCard icon="target" title="Focus offer" hint="The primary CTA and case angle every idea sells.">
+              <div v-if="hasOffers" class="wp-details">
+                <div class="pw-search">
+                  <Icon name="search" :size="14" />
+                  <input v-model="offerSearch" type="search" placeholder="Search offers by name or promise" aria-label="Search offers" />
+                </div>
+                <div class="pw-offers" role="radiogroup" aria-label="Focus offer" :aria-busy="offersLoading">
+                  <button
+                    v-for="item in offers"
+                    :key="item.id"
+                    type="button"
+                    class="pw-offer"
+                    :class="{ selected: offerId === item.id }"
+                    role="radio"
+                    :aria-checked="offerId === item.id"
+                    @click="offer = item"
+                  >
+                    <span class="pw-radio" aria-hidden="true"></span>
+                    <span class="pw-offer-text">
+                      <span class="pw-offer-name">{{ item.name }}</span>
+                      <span class="pw-offer-promise">{{ item.promise }}</span>
+                    </span>
+                    <span class="pw-offer-count" :class="{ has: ideaCountFor(item, ideaCounts) > 0 }">
+                      {{ ideaCountFor(item, ideaCounts) }} {{ ideaCountFor(item, ideaCounts) === 1 ? "idea" : "ideas" }}
+                    </span>
+                  </button>
+                  <button
+                    v-if="offerPage < offerLastPage"
+                    type="button"
+                    class="offer-more"
+                    :disabled="offersLoading"
+                    @click="searchOffers(offerPage + 1)"
+                  >
+                    {{ offersLoading ? "Loading…" : "Load more offers" }}
+                  </button>
+                  <div v-if="!offers.length && offersLoading" class="offer-empty">
+                    <span class="wp-muted">Searching offers…</span>
+                  </div>
+                  <div v-else-if="!offers.length" class="offer-empty">
+                    <span class="wp-muted">No offers match "{{ offerSearch }}".</span>
+                    <button type="button" class="wp-btn" @click="offerSearch = ''">Clear search</button>
+                  </div>
+                </div>
+              </div>
+              <div v-else-if="!error" class="cp-empty">
+                <p class="cp-empty-title">No offers to plan from</p>
+                <p>Add an offer in the Growth Engine web app (Brain &gt; Offers) first.</p>
+              </div>
+            </SectionCard>
+          </template>
+
+          <!-- 2. Creation mode -->
+          <template v-else-if="step === 2">
+            <SectionCard icon="bot" title="Creation mode" hint="How the editorial agent writes these ideas.">
+              <div class="pw-choices">
+                <button type="button" class="pw-choice" :class="{ selected: mode === 'ai' }" :aria-pressed="mode === 'ai'" @click="mode = 'ai'">
+                  <span class="pw-choice-icon"><Icon name="sparkles" :size="16" /></span>
+                  <b>AI Mode</b>
+                  <span>Written by an AI agent CLI on this computer, from your offer and idea skill.</span>
+                </button>
+                <button type="button" class="pw-choice" disabled>
+                  <span class="pw-choice-icon"><Icon name="layers" :size="16" /></span>
+                  <b>Swipe File Mode <span class="pw-soon">Coming soon</span></b>
+                  <span>Adapt structures from saved swipe file items.</span>
+                </button>
+              </div>
+            </SectionCard>
+
+            <SectionCard icon="settings" title="AI agent" hint="Agents come from the CLIs detected in Settings > AI agents.">
+              <label v-if="installed.length" class="wp-field">
+                <span>Agent</span>
+                <select v-model="provider" class="wp-input">
+                  <option v-for="cli in installed" :key="cli.id" :value="cli.id">
+                    {{ cli.name }}{{ cli.version ? ` (${cli.version})` : "" }}
+                  </option>
+                </select>
+              </label>
+              <div v-else class="cp-empty">
+                <p class="cp-empty-title">No AI agent CLI found</p>
+                <p>Install Claude Code or Antigravity, then check Settings.</p>
+                <button type="button" class="cp-connect" @click="emit('openSettings')">Open Settings</button>
+              </div>
+            </SectionCard>
+          </template>
+
+          <!-- 3. Images + generation -->
+          <template v-else>
+            <SectionCard icon="eye" title="Cover images" hint="Should the agent plan a cover image for each post?">
+              <div class="pw-choices">
+                <button
+                  type="button"
+                  class="pw-choice"
+                  :class="{ selected: withImages }"
+                  :aria-pressed="withImages"
+                  :disabled="generating"
+                  @click="withImages = true"
+                >
+                  <span class="pw-choice-icon"><Icon name="eye" :size="16" /></span>
+                  <b>Yes, with images</b>
+                  <span>The agent adds a cover image brief to each idea.</span>
+                </button>
+                <button
+                  type="button"
+                  class="pw-choice"
+                  :class="{ selected: !withImages }"
+                  :aria-pressed="!withImages"
+                  :disabled="generating"
+                  @click="withImages = false"
+                >
+                  <span class="pw-choice-icon"><Icon name="fileText" :size="16" /></span>
+                  <b>No, text only</b>
+                  <span>Ideas are drafted as text only.</span>
+                </button>
+              </div>
+            </SectionCard>
+
+            <!-- Live activity: what the agent is doing right now -->
+            <SectionCard
+              v-if="generating || activity.length"
+              icon="radio"
+              :title="generating ? `${providerName} is working` : 'Last run'"
+              :hint="`Elapsed ${elapsedLabel}`"
             >
-              <span class="offer-option-text">
-                <b>{{ item.name }}</b>
-                <span class="muted small">{{ item.promise }}</span>
-              </span>
-              <span class="badge" :class="{ 'badge-primary': ideaCountFor(item, ideaCounts) > 0 }">
-                {{ ideaCountFor(item, ideaCounts) }} {{ ideaCountFor(item, ideaCounts) === 1 ? "idea" : "ideas" }}
-              </span>
-            </button>
-            <button
-              v-if="offerPage < offerLastPage"
-              type="button"
-              class="offer-more"
-              :disabled="offersLoading"
-              @click="searchOffers(offerPage + 1)"
-            >
-              {{ offersLoading ? "Loading…" : "Load more offers" }}
-            </button>
-            <div v-if="!offers.length && offersLoading" class="offer-empty">
-              <span class="muted">Searching offers…</span>
+              <template v-if="generating" #action>
+                <button class="wp-btn" :disabled="stopping" @click="stop">{{ stopping ? "Stopping…" : "Stop generating" }}</button>
+              </template>
+              <div class="wp-details">
+                <ol class="activity" aria-live="polite">
+                  <li v-for="(entry, index) in activity" :key="index" :class="`activity-${entry.kind}`">
+                    <span class="activity-mark" aria-hidden="true">
+                      {{ entry.kind === "denied" ? "!" : entry.kind === "stage" && (!generating || index < activity.length - 1) ? "✓" : "•" }}
+                    </span>
+                    <span>{{ entry.message }}</span>
+                  </li>
+                </ol>
+                <div v-if="liveText" class="wp-field">
+                  <span>Live output from {{ providerName }}</span>
+                  <pre ref="liveBox" class="live-output" tabindex="0">{{ liveText }}</pre>
+                </div>
+                <p v-else-if="generating" class="wp-muted">
+                  Nothing written yet. Agents usually think for a while before the first words appear.
+                </p>
+              </div>
+            </SectionCard>
+
+            <!-- Permission request the headless agent could not ask for itself -->
+            <div v-if="neededTools.length && !generating" class="wp-alert wp-alert-info pw-permission" role="alert">
+              <Icon name="alertTriangle" :size="16" />
+              <div class="wp-details">
+                <b>{{ providerName }} needs your permission</b>
+                <p>
+                  {{ providerName }} asked to use
+                  <template v-for="(tool, index) in neededTools" :key="tool"><code class="wp-code">{{ tool }}</code>{{ index < neededTools.length - 1 ? ", " : "" }}</template>.
+                  It runs in the background and can't ask you directly, so the request was denied and no ideas came back.
+                </p>
+                <p class="wp-muted">
+                  Allowing lets {{ providerName }} use {{ neededTools.length === 1 ? "this tool" : "these tools" }} on every run without asking.
+                  It works in an empty app folder, and you can revoke this in Settings &gt; AI agents.
+                </p>
+                <div class="wp-actions">
+                  <button class="wp-btn wp-btn-primary" @click="allowAndRetry">Allow and run again</button>
+                  <button class="wp-btn" @click="neededTools = []">Don't allow</button>
+                </div>
+              </div>
             </div>
-            <div v-else-if="!offers.length" class="offer-empty">
-              <span class="muted">No offers match "{{ offerSearch }}".</span>
-              <button type="button" class="btn btn-sm" @click="offerSearch = ''">Clear search</button>
+          </template>
+        </div>
+      </main>
+
+      <!-- Live summary of the plan, like the composer's live preview -->
+      <aside class="wp-preview pw-summary" aria-label="Plan summary">
+        <div class="wp-preview-head">
+          <span class="wp-preview-label"><Icon name="calendarClock" :size="14" /> Plan summary</span>
+        </div>
+        <div class="pw-summary-card">
+          <div class="pw-summary-total">
+            <span class="pw-summary-num">{{ total }}</span>
+            <span>{{ total === 1 ? "idea" : "ideas" }} for {{ week }}</span>
+          </div>
+
+          <div class="pw-summary-block">
+            <span class="pw-summary-label">Topic</span>
+            <template v-if="hasTopic">
+              <span class="pw-summary-value">{{ topicTitle.trim() || "Untitled topic" }}</span>
+              <span v-if="topicDescription.trim()" class="pw-summary-desc">{{ topicDescription.trim() }}</span>
+            </template>
+            <span v-else class="pw-summary-empty">None. The agent picks angles from the offer.</span>
+          </div>
+
+          <div class="pw-summary-block">
+            <span class="pw-summary-label">Channels</span>
+            <ul class="pw-summary-channels">
+              <li v-for="channel in channels" :key="channel.id" :class="{ off: !counts[channel.id] }">
+                <PlatformIcon :platform="channel.platform" size="sm" />
+                <span class="pw-summary-channel">{{ channel.name }}</span>
+                <span class="pw-bar" aria-hidden="true">
+                  <span :style="{ width: `${(counts[channel.id] / MAX_POSTS_PER_CHANNEL) * 100}%`, background: channel.color }"></span>
+                </span>
+                <b>{{ counts[channel.id] }}</b>
+              </li>
+            </ul>
+          </div>
+
+          <dl class="pw-summary-facts">
+            <div>
+              <dt>Focus offer</dt>
+              <dd>{{ offer?.name ?? "Not picked" }}</dd>
             </div>
-          </div>
-          <span v-if="offer" class="muted small">Selected: {{ offer.name }}</span>
-        </template>
-        <div v-else-if="!error" class="alert alert-error">
-          There are no offers to plan from. Add an offer in the Growth Engine web app (Brain &gt; Offers) first.
+            <div>
+              <dt>Written by</dt>
+              <dd>{{ step > 1 ? providerName : "Picked next" }}</dd>
+            </div>
+            <div>
+              <dt>Cover images</dt>
+              <dd>{{ step > 2 ? (withImages ? "Yes" : "No") : "Picked later" }}</dd>
+            </div>
+          </dl>
         </div>
-      </div>
-
-    </template>
-
-    <!-- 2. Creation mode -->
-    <template v-else-if="step === 2">
-      <h2>How should the editorial agent write these ideas?</h2>
-      <div class="choice-grid">
-        <button type="button" class="choice" :class="{ selected: mode === 'ai' }" :aria-pressed="mode === 'ai'" @click="mode = 'ai'">
-          <b>AI Mode</b>
-          <span class="muted small">Written by an AI agent CLI on this computer, from your offer and idea skill.</span>
-        </button>
-        <button type="button" class="choice" disabled>
-          <b>Swipe File Mode <span class="badge">Coming soon</span></b>
-          <span class="muted small">Adapt structures from saved swipe file items.</span>
-        </button>
-      </div>
-
-      <div v-if="installed.length" class="field">
-        <label for="plan-provider">AI agent</label>
-        <select id="plan-provider" v-model="provider" class="input">
-          <option v-for="cli in installed" :key="cli.id" :value="cli.id">
-            {{ cli.name }}{{ cli.version ? ` (${cli.version})` : "" }}
-          </option>
-        </select>
-        <span class="muted small">Agents come from the CLIs detected in Settings &gt; AI agents.</span>
-      </div>
-      <div v-else class="alert alert-error">
-        No AI agent CLI was found on this computer. Install Claude Code or Antigravity, then check Settings.
-        <div style="margin-top: 8px"><button class="btn btn-sm" @click="emit('openSettings')">Open Settings</button></div>
-      </div>
-    </template>
-
-    <!-- 3. Images + generation -->
-    <template v-else>
-      <h2>Plan cover images for these posts?</h2>
-      <div class="choice-grid">
-        <button type="button" class="choice" :class="{ selected: withImages }" :aria-pressed="withImages" :disabled="generating" @click="withImages = true">
-          <b>Yes, with images</b>
-          <span class="muted small">The agent adds a cover image brief to each idea.</span>
-        </button>
-        <button type="button" class="choice" :class="{ selected: !withImages }" :aria-pressed="!withImages" :disabled="generating" @click="withImages = false">
-          <b>No, text only</b>
-          <span class="muted small">Ideas are drafted as text only.</span>
-        </button>
-      </div>
-
-      <div class="panel">
-        <h3>Plan summary</h3>
-        <ul class="small" style="margin: 6px 0 0; padding-left: 18px">
-          <li>{{ total }} {{ total === 1 ? "idea" : "ideas" }} across {{ activeChannels.length }} {{ activeChannels.length === 1 ? "channel" : "channels" }}</li>
-          <li>Focus offer: {{ offer?.name }}</li>
-          <li>Written by: {{ providerName }}</li>
-          <li>Cover image briefs: {{ withImages ? "Yes" : "No" }}</li>
-        </ul>
-      </div>
-
-      <!-- Live activity: what the agent is doing right now -->
-      <section v-if="generating || activity.length" class="card stack" aria-label="Generation activity">
-        <div class="row-between">
-          <div class="row" style="gap: 8px">
-            <span v-if="generating" class="spinner" style="color: var(--primary)"></span>
-            <h3>{{ generating ? `${providerName} is working` : "Last run" }}</h3>
-            <span class="muted small" aria-label="Elapsed time">{{ elapsedLabel }}</span>
-          </div>
-          <button v-if="generating" class="btn btn-sm" :disabled="stopping" @click="stop">
-            {{ stopping ? "Stopping…" : "Stop generating" }}
-          </button>
-        </div>
-
-        <ol class="activity" aria-live="polite">
-          <li v-for="(entry, index) in activity" :key="index" :class="`activity-${entry.kind}`">
-            <span class="activity-mark" aria-hidden="true">
-              {{ entry.kind === "denied" ? "!" : entry.kind === "stage" && (!generating || index < activity.length - 1) ? "✓" : "•" }}
-            </span>
-            <span>{{ entry.message }}</span>
-          </li>
-        </ol>
-
-        <div v-if="liveText" class="field">
-          <span class="label">Live output from {{ providerName }}</span>
-          <pre ref="liveBox" class="live-output" tabindex="0">{{ liveText }}</pre>
-        </div>
-        <p v-else-if="generating" class="muted small">
-          Nothing written yet. Agents usually think for a while before the first words appear.
+        <p class="wp-muted pw-summary-note">
+          {{ activeChannels.length }} {{ activeChannels.length === 1 ? "channel" : "channels" }}. Each idea is tagged with its channel on the Ideas page.
         </p>
-      </section>
+      </aside>
+    </div>
 
-      <!-- Permission request the headless agent could not ask for itself -->
-      <section v-if="neededTools.length && !generating" class="card stack permission" role="alert">
-        <h3>{{ providerName }} needs your permission</h3>
-        <p>
-          {{ providerName }} asked to use
-          <template v-for="(tool, index) in neededTools" :key="tool"><code>{{ tool }}</code>{{ index < neededTools.length - 1 ? ", " : "" }}</template>.
-          It runs in the background and can't ask you directly, so the request was denied and no ideas came back.
-        </p>
-        <p class="muted small">
-          Allowing lets {{ providerName }} use {{ neededTools.length === 1 ? "this tool" : "these tools" }} on every run without asking.
-          It works in an empty app folder, and you can revoke this in Settings &gt; AI agents.
-        </p>
-        <div class="row">
-          <button class="btn btn-primary" @click="allowAndRetry">Allow and run again</button>
-          <button class="btn" @click="neededTools = []">Don't allow</button>
-        </div>
-      </section>
-    </template>
+    <footer class="pw-foot">
+      <button v-if="step === 1" class="wp-btn" @click="emit('close')">Cancel</button>
+      <button v-else class="wp-btn" :disabled="generating" @click="back"><Icon name="arrowLeft" :size="14" /> Back</button>
 
-    <div v-if="error" class="alert alert-error" role="alert">{{ error }}</div>
+      <div class="pw-foot-right">
+        <span v-if="blocker" class="wp-muted">{{ blocker }}</span>
+        <button v-if="step < 3" class="wp-btn wp-btn-primary" :disabled="loading || !canContinue" @click="next">
+          Next <Icon name="arrowRight" :size="14" />
+        </button>
+        <button v-else class="wp-btn wp-btn-primary" :disabled="generating" @click="generate">
+          <span v-if="generating" class="spinner" style="width: 13px; height: 13px; border-width: 1.5px"></span>
+          <Icon v-else name="sparkles" :size="14" />
+          {{ generating ? "Generating…" : error || neededTools.length ? "Try again" : `Generate weekly plan (${total} ${total === 1 ? "idea" : "ideas"})` }}
+        </button>
+      </div>
+    </footer>
   </div>
-
-  <footer class="plan-foot">
-    <button v-if="step === 1" class="btn" @click="emit('close')">Cancel</button>
-    <button v-else class="btn" :disabled="generating" @click="step--; error = ''">Back</button>
-
-    <button v-if="step < 3" class="btn btn-primary" :disabled="loading || !canContinue" @click="next">Next</button>
-    <button v-else class="btn btn-primary" :disabled="generating" @click="generate">
-      <span v-if="generating" class="spinner"></span>
-      {{ generating ? "Generating…" : error || neededTools.length ? "Try again" : `Generate weekly plan (${total} ideas)` }}
-    </button>
-  </footer>
 </template>
