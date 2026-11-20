@@ -100,7 +100,7 @@ async function loadOffers(page: number) {
   const request = ++offerRequest;
   offersLoading.value = true;
   try {
-    const result = await api.listOffers(page, offerSearch.value);
+    const result = await api.listOffers(page, { search: offerSearch.value });
     if (request !== offerRequest) return; // a newer search replaced this one
     offers.value = page === 1 ? result.offers : [...offers.value, ...result.offers];
     offerPage.value = result.meta.current_page;

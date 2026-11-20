@@ -5,15 +5,17 @@ import type { Session } from "../api";
 import type { IconName } from "../icons";
 import Icon from "../components/Icon.vue";
 import CompanyAvatar from "../components/CompanyAvatar.vue";
+import RefreshControls from "../components/RefreshControls.vue";
 import {
-  autoRefresh,
   loadOverview,
   overview,
+  overviewAutoRefresh,
   overviewError as error,
   overviewLoaded as loaded,
   overviewRefreshing as refreshing,
-  refreshCountdown as remaining,
 } from "../overviewStore";
+
+const { enabled: autoRefresh, countdown } = overviewAutoRefresh;
 
 export type OverviewTarget = "offers" | "icps" | "proof" | "ideas" | "publish";
 
@@ -104,21 +106,7 @@ const stageClass = (color: string) => `stage-${STAGE_COLORS.includes(color) ? co
         <h1 class="ov-title">{{ greeting() }}{{ firstName ? `, ${firstName}` : "" }}</h1>
         <p v-if="overview" class="ov-sm ov-gray-500" style="margin-top: 2px">Here's how {{ overview.profile.company_name }} is growing.</p>
       </div>
-      <div class="ov-actions">
-        <label class="ov-auto" :title="autoRefresh ? 'Turn off auto refresh' : 'Refresh every 30 minutes'">
-          <input v-model="autoRefresh" type="checkbox" role="switch" class="ov-switch-input" />
-          <span class="ov-switch" aria-hidden="true"></span>
-          <span>Auto refresh</span>
-          <span v-if="autoRefresh" class="ov-countdown" aria-live="off">
-            {{ refreshing ? "refreshing…" : `in ${remaining}` }}
-          </span>
-        </label>
-        <button class="ov-btn" :disabled="refreshing" @click="load()">
-          <span v-if="refreshing" class="spinner" style="width: 14px; height: 14px"></span>
-          <Icon v-else name="refresh" />
-          Refresh
-        </button>
-      </div>
+      <RefreshControls v-model="autoRefresh" :countdown="countdown" :refreshing="refreshing" @refresh="load()" />
     </div>
 
     <div v-if="error" class="alert alert-error" role="alert">

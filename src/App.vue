@@ -37,7 +37,7 @@ const NAV: { title: string | null; items: { id: Page; label: string }[] }[] = [
 const loading = ref(true);
 const startupError = ref("");
 const session = ref<Session | null>(null);
-const page = ref<Page>("ideas");
+const page = ref<Page>("overview");
 const appVersion = ref("");
 
 watch(session, (current) => (current ? startOverviewTimer() : stopOverviewTimer()));
@@ -57,7 +57,7 @@ async function signOut() {
   try {
     await api.logout();
     session.value = null;
-    page.value = "ideas";
+    page.value = "overview";
   } catch (error) {
     startupError.value = errorMessage(error);
   }
@@ -122,7 +122,7 @@ async function signOut() {
 
     <main class="main">
       <OverviewView v-if="page === 'overview'" :session="session" @navigate="page = $event" />
-      <OffersView v-else-if="page === 'offers'" />
+      <OffersView v-else-if="page === 'offers'" :session="session" />
       <IcpsView v-else-if="page === 'icps'" />
       <ProofView v-else-if="page === 'proof'" />
       <IdeasView v-else-if="page === 'ideas'" :session="session" @open-settings="page = 'settings'" />

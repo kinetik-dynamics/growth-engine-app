@@ -16,14 +16,31 @@ export interface Offer {
   price_range: string | null;
   timeline: string | null;
   deliverables: string[];
+  drafted_by_agent: boolean;
+  case_studies_count: number;
+  leads_count: number;
   icps: { id: number; name: string; pain: string | null }[];
   case_studies: { id: number; title: string; client_name: string | null; result: string }[];
 }
 
-/** One page of offers from the server, newest first. */
+export type OfferPricing = "all" | "priced" | "unpriced";
+export type OfferSource = "all" | "agent" | "manual";
+export type OfferSort = "newest" | "drafted" | "name" | "proof" | "recent";
+
+export interface OfferFilters {
+  search?: string;
+  icpId?: number | null;
+  pricing?: OfferPricing;
+  source?: OfferSource;
+  sort?: OfferSort;
+}
+
+/** One page of offers from the server, plus totals that ignore the filters. */
 export interface OfferPage {
   offers: Offer[];
   meta: { current_page: number; last_page: number; per_page: number; total: number };
+  stats: { total: number; drafted_by_agent: number; priced: number; with_proof: number };
+  icp_options: { id: number; name: string }[];
 }
 
 export type IdeaTab = "drafts" | "sent";
@@ -223,7 +240,15 @@ export const api = {
   getSession: () => invoke<Session | null>("get_session"),
   login: (baseUrl: string, token: string) => invoke<Session>("login", { baseUrl, token }),
   logout: () => invoke<void>("logout"),
-  listOffers: (page = 1, search = "") => invoke<OfferPage>("list_offers", { page, search }),
+  listOffers: (page = 1, filters: OfferFilters = {}) =>
+    invoke<OfferPage>("list_offers", {
+      page,
+      search: filters.search ?? "",
+      icpId: filters.icpId ?? null,
+      pricing: filters.pricing ?? null,
+      source: filters.source ?? null,
+      sort: filters.sort ?? null,
+    }),
   sitePage: <K extends keyof SitePages>(page: K) => invoke<SitePages[K]>("site_page", { page }),
   detectClis: () => invoke<CliStatus[]>("detect_clis"),
   testCli: (provider: string) => invoke<string>("test_cli", { provider }),

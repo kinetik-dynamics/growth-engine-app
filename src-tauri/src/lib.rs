@@ -98,13 +98,28 @@ fn logout(app: AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
-async fn list_offers(app: AppHandle, page: Option<u32>, search: Option<String>) -> Result<Value, String> {
+#[allow(clippy::too_many_arguments)]
+async fn list_offers(
+    app: AppHandle,
+    page: Option<u32>,
+    search: Option<String>,
+    icp_id: Option<u32>,
+    pricing: Option<String>,
+    source: Option<String>,
+    sort: Option<String>,
+) -> Result<Value, String> {
     let config = signed_in(&app)?;
     let mut query = vec![("page", page.unwrap_or(1).max(1).to_string())];
-    if let Some(search) = search.map(|search| search.trim().to_string()).filter(|search| !search.is_empty()) {
-        query.push(("search", search));
+    if let Some(icp_id) = icp_id {
+        query.push(("icp_id", icp_id.to_string()));
     }
-    // The server answers `{ offers, meta }`: one page, newest offers first.
+    // The server validates these values, so they are passed through as-is.
+    for (key, value) in [("search", search), ("pricing", pricing), ("source", source), ("sort", sort)] {
+        if let Some(value) = value.map(|value| value.trim().to_string()).filter(|value| !value.is_empty()) {
+            query.push((key, value));
+        }
+    }
+    // The server answers `{ offers, meta, stats, icp_options, company }`: one page, newest first by default.
     api::get_query(&config.session.base_url, &config.token, "/api/offers", &query).await
 }
 
