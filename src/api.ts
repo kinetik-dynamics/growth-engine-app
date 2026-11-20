@@ -195,7 +195,10 @@ export interface SiteProof {
   industry: string | null;
   result: string;
   can_name_client: boolean;
+  drafted_by_agent: boolean;
+  offer_id: number | null;
   offer: Named | null;
+  updated_at: string;
 }
 
 export interface PublishChannel {
@@ -220,7 +223,7 @@ export interface SitePost {
 export interface SitePages {
   overview: { overview: Overview | null };
   icps: { icps: SiteIcp[]; offerOptions: Named[] };
-  proof: { proof: SiteProof[] };
+  proof: { proof: SiteProof[]; offerOptions: Named[] };
   publish: { channels: PublishChannel[]; posts: SitePost[] };
 }
 
