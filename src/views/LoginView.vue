@@ -26,7 +26,13 @@ async function activate() {
 <template>
   <div class="login">
     <form class="card login-card" @submit.prevent="activate">
-      <div class="brand" style="padding: 0"><span class="brand-mark">GE</span> Growth Engine</div>
+      <div class="brand" style="padding: 0">
+        <img src="/logo-sm.png" alt="Growth Engine icon" class="brand-icon" />
+        <div class="brand-text">
+          <span class="brand-name">Kinetik Dynamics</span>
+          <span class="brand-sub">Growth Engine</span>
+        </div>
+      </div>
       <div>
         <h1>Activate this app</h1>
         <p class="muted">
