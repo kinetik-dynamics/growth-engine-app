@@ -2,9 +2,9 @@
 //! through them. The app has no API keys of its own: whichever CLI the user
 //! has already signed in to does the writing.
 //!
-//! Claude Code and Antigravity are run in their streaming JSON modes so the
-//! UI can show what the agent is doing and which tool permissions it was
-//! denied (headless mode cannot ask the user, so requests are auto-denied).
+//! Claude Code, Antigravity and OpenCode are run in their streaming JSON modes
+//! so the UI can show what the agent is doing and which tool permissions it
+//! was denied (headless mode cannot ask the user, so requests are auto-denied).
 
 use serde::Serialize;
 use serde_json::Value;
@@ -22,11 +22,12 @@ pub struct Provider {
     pub bin: &'static str,
 }
 
-pub const PROVIDERS: [Provider; 4] = [
+pub const PROVIDERS: [Provider; 5] = [
     Provider { id: "claude", name: "Claude Code", bin: "claude" },
     Provider { id: "antigravity", name: "Antigravity", bin: "agy" },
     Provider { id: "gemini", name: "Gemini CLI", bin: "gemini" },
     Provider { id: "codex", name: "Codex CLI", bin: "codex" },
+    Provider { id: "opencode", name: "OpenCode", bin: "opencode" },
 ];
 
 /// Windows caps a whole command line at 32,767 characters; providers that
@@ -365,8 +366,38 @@ fn parse_antigravity_line(event: &Value, state: &mut StreamState) -> Vec<Progres
     }
 }
 
+/// Interprets one line of OpenCode's `--format json` output.
+fn parse_opencode_line(event: &Value, state: &mut StreamState) -> Vec<Progress> {
+    match event["type"].as_str() {
+        Some("text") => {
+            let text = event["part"]["text"].as_str().unwrap_or_default();
+            if text.is_empty() {
+                vec![]
+            } else {
+                state.streamed.push_str(text);
+                vec![Progress::Text(text.to_string())]
+            }
+        }
+        Some("tool_use") => {
+            vec![Progress::Tool(event["part"]["tool"].as_str().unwrap_or("a tool").to_string())]
+        }
+        Some("error") => {
+            state.failed = Some(
+                event["error"]["data"]["message"]
+                    .as_str()
+                    .filter(|message| !message.is_empty())
+                    .map(str::to_string)
+                    .or_else(|| event["error"]["name"].as_str().map(str::to_string))
+                    .unwrap_or_else(|| "unknown error".into()),
+            );
+            vec![]
+        }
+        _ => vec![],
+    }
+}
+
 fn parse_line(provider_id: &str, line: &str, state: &mut StreamState) -> Vec<Progress> {
-    let streams_json = matches!(provider_id, "claude" | "antigravity");
+    let streams_json = matches!(provider_id, "claude" | "antigravity" | "opencode");
     if !streams_json {
         // Plain-text CLIs: every line is part of the answer.
         state.streamed.push_str(line);
@@ -378,6 +409,7 @@ fn parse_line(provider_id: &str, line: &str, state: &mut StreamState) -> Vec<Pro
     }
     match serde_json::from_str::<Value>(line) {
         Ok(event) if provider_id == "claude" => parse_claude_line(&event, state),
+        Ok(event) if provider_id == "opencode" => parse_opencode_line(&event, state),
         Ok(event) => parse_antigravity_line(&event, state),
         Err(_) => vec![Progress::Log(line.to_string())],
     }
@@ -431,6 +463,7 @@ pub fn prompt(
         }
         "gemini" => args.extend(["--skip-trust", "-p", "Follow the instructions given on stdin."]),
         "codex" => args.extend(["exec", "--skip-git-repo-check", "-"]),
+        "opencode" => args.extend(["run", "--format", "json", "Follow the instructions given on stdin."]),
         _ => unreachable!("every provider in PROVIDERS has an invocation"),
     }
 
@@ -547,6 +580,30 @@ mod tests {
         assert!(matches!(&progress[3], Progress::Denied { tool, .. } if tool == "write_file"));
         assert_eq!(state.denied, ["write_file"]);
         assert_eq!(state.text(), "Hello");
+    }
+
+    #[test]
+    fn opencode_stream_yields_text_tools_and_errors() {
+        let (state, progress) = feed(
+            "opencode",
+            &[
+                r#"{"type":"step_start","part":{"type":"step-start"}}"#,
+                r#"{"type":"text","part":{"type":"text","text":"Hel"}}"#,
+                r#"{"type":"text","part":{"type":"text","text":"lo"}}"#,
+                r#"{"type":"tool_use","part":{"type":"tool","tool":"write"}}"#,
+                r#"{"type":"step_finish","part":{"type":"step-finish"}}"#,
+            ],
+        );
+
+        assert_eq!(progress, [Progress::Text("Hel".into()), Progress::Text("lo".into()), Progress::Tool("write".into())]);
+        assert_eq!(state.text(), "Hello");
+        assert!(state.failed.is_none());
+
+        let (failed, _) = feed(
+            "opencode",
+            &[r#"{"type":"error","error":{"name":"ProviderAuthError","data":{"message":"Not signed in"}}}"#],
+        );
+        assert_eq!(failed.failed.as_deref(), Some("Not signed in"));
     }
 
     #[test]

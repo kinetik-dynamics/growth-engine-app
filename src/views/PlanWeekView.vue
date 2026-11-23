@@ -460,7 +460,7 @@ async function allowAndRetry() {
               </label>
               <div v-else class="cp-empty">
                 <p class="cp-empty-title">No AI agent CLI found</p>
-                <p>Install Claude Code or Antigravity, then check Settings.</p>
+                <p>Install Claude Code, Antigravity or OpenCode, then check Settings.</p>
                 <button type="button" class="cp-connect" @click="emit('openSettings')">Open Settings</button>
               </div>
             </SectionCard>
