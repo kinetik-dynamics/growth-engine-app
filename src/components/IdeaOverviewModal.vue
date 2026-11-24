@@ -5,6 +5,7 @@ import { plannedChannel } from "../channels";
 import { formatPostPreviewHtml } from "../textFormatter";
 import Icon from "./Icon.vue";
 import PlatformIcon from "./PlatformIcon.vue";
+import PostAnalytics from "./PostAnalytics.vue";
 
 /** A read-only look at an idea's full content, with its cover image tools close at hand. */
 const props = defineProps<{ idea: Idea; actionLabel: string }>();
@@ -157,6 +158,14 @@ onUnmounted(() => window.removeEventListener("keydown", onKey));
             <b>{{ fact.value }}</b>
           </div>
         </div>
+
+        <section v-if="current.sentAt || current.publishedAt">
+          <PostAnalytics
+            :post-id="current.id"
+            :channel-id="current.channelId || 'linkedin_personal'"
+            :channel-platform="current.channelPlatform"
+          />
+        </section>
 
         <section>
           <div class="pd-label">Cover image</div>

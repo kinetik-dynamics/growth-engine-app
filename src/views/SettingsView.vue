@@ -82,6 +82,39 @@ async function revoke(permission: Permission) {
 }
 
 /* Side navigation */
+const channelTokens = ref<Record<string, string>>({});
+const tokenInputs = reactive<Record<string, string>>({
+  linkedin_personal: "",
+  facebook_page: "",
+  x_profile: "",
+});
+const savingTokens = reactive<Record<string, boolean>>({});
+const tokenMessages = reactive<Record<string, string>>({});
+
+async function loadChannelTokens() {
+  try {
+    channelTokens.value = await api.getChannelTokens();
+    for (const [ch, val] of Object.entries(channelTokens.value)) {
+      tokenInputs[ch] = val;
+    }
+  } catch {}
+}
+
+async function saveToken(channelId: string) {
+  savingTokens[channelId] = true;
+  tokenMessages[channelId] = "";
+  try {
+    await api.saveChannelToken(channelId, tokenInputs[channelId] || "");
+    await loadChannelTokens();
+    tokenMessages[channelId] = "Saved!";
+    setTimeout(() => (tokenMessages[channelId] = ""), 2500);
+  } catch (caught) {
+    tokenMessages[channelId] = errorMessage(caught);
+  } finally {
+    savingTokens[channelId] = false;
+  }
+}
+
 const NAV = computed<{ id: Tab; label: string; icon: IconName; sub: string; dot?: "ok" | "warn" | "info" }[]>(() => [
   {
     id: "skills",
@@ -109,6 +142,13 @@ const NAV = computed<{ id: Tab; label: string; icon: IconName; sub: string; dot?
     dot: imageApi.value?.configured ? "ok" : undefined,
   },
   {
+    id: "tokens",
+    label: "Channel tokens",
+    icon: "link",
+    sub: Object.keys(channelTokens.value).length ? `${Object.keys(channelTokens.value).length} configured` : "Social media APIs",
+    dot: Object.keys(channelTokens.value).length ? "ok" : undefined,
+  },
+  {
     id: "updates",
     label: "Updates",
     icon: "download",
@@ -120,6 +160,7 @@ const NAV = computed<{ id: Tab; label: string; icon: IconName; sub: string; dot?
 onMounted(async () => {
   scan();
   loadPermissions();
+  loadChannelTokens();
   api.getImageApi().then((status) => (imageApi.value = status)).catch(() => {});
   api.listSkills().then((skills) => (skillCount.value = skills.length)).catch(() => {});
   try {
@@ -253,6 +294,130 @@ onMounted(async () => {
               <div v-if="tests[cli.id]?.state === 'failed'" class="st-result bad" role="alert">
                 <Icon name="alertCircle" :size="14" /> {{ tests[cli.id].detail }}
               </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Channel Tokens -->
+        <div v-else-if="tab === 'tokens'" class="pub-section st-narrow">
+          <div class="pub-section-head st-section-head">
+            <div>
+              <h2>Channel tokens</h2>
+              <p>Configure API access tokens for social channels to fetch live post analytics.</p>
+            </div>
+          </div>
+
+          <!-- LinkedIn Personal -->
+          <div class="st-card" style="margin-bottom: 16px">
+            <div class="st-card-head">
+              <div class="st-card-title">
+                <span class="st-card-icon" style="background: #eff6ff; color: #0a66c2"><Icon name="link" :size="16" /></span>
+                <div class="st-card-meta">
+                  <div class="st-card-name">
+                    <span>LinkedIn (Personal Profile)</span>
+                    <span v-if="channelTokens.linkedin_personal" class="st-pill ok">Configured</span>
+                    <span v-else class="st-pill">Not set</span>
+                  </div>
+                  <div class="st-card-path">Used for socialActions (likes, comments) and memberCreatorPostAnalytics</div>
+                </div>
+              </div>
+            </div>
+            <div class="st-card-foot" style="flex-direction: column; align-items: stretch; gap: 8px">
+              <div style="display: flex; gap: 8px">
+                <input
+                  v-model="tokenInputs.linkedin_personal"
+                  type="password"
+                  class="input"
+                  style="flex: 1"
+                  placeholder="Paste LinkedIn Access Token (AQ...)"
+                />
+                <button
+                  class="btn btn-sm btn-primary"
+                  :disabled="savingTokens.linkedin_personal"
+                  @click="saveToken('linkedin_personal')"
+                >
+                  {{ savingTokens.linkedin_personal ? "Saving…" : "Save" }}
+                </button>
+              </div>
+              <span v-if="tokenMessages.linkedin_personal" class="st-hint" style="color: #059669">
+                {{ tokenMessages.linkedin_personal }}
+              </span>
+            </div>
+          </div>
+
+          <!-- Facebook Page -->
+          <div class="st-card" style="margin-bottom: 16px">
+            <div class="st-card-head">
+              <div class="st-card-title">
+                <span class="st-card-icon" style="background: #eff6ff; color: #1877f2"><Icon name="link" :size="16" /></span>
+                <div class="st-card-meta">
+                  <div class="st-card-name">
+                    <span>Facebook (Page)</span>
+                    <span v-if="channelTokens.facebook_page" class="st-pill ok">Configured</span>
+                    <span v-else class="st-pill">Not set</span>
+                  </div>
+                  <div class="st-card-path">Used for Graph API post insights (impressions, views) and reactions/comments</div>
+                </div>
+              </div>
+            </div>
+            <div class="st-card-foot" style="flex-direction: column; align-items: stretch; gap: 8px">
+              <div style="display: flex; gap: 8px">
+                <input
+                  v-model="tokenInputs.facebook_page"
+                  type="password"
+                  class="input"
+                  style="flex: 1"
+                  placeholder="Paste Facebook Page Access Token (EA...)"
+                />
+                <button
+                  class="btn btn-sm btn-primary"
+                  :disabled="savingTokens.facebook_page"
+                  @click="saveToken('facebook_page')"
+                >
+                  {{ savingTokens.facebook_page ? "Saving…" : "Save" }}
+                </button>
+              </div>
+              <span v-if="tokenMessages.facebook_page" class="st-hint" style="color: #059669">
+                {{ tokenMessages.facebook_page }}
+              </span>
+            </div>
+          </div>
+
+          <!-- X Profile -->
+          <div class="st-card">
+            <div class="st-card-head">
+              <div class="st-card-title">
+                <span class="st-card-icon" style="background: #f3f4f6; color: #111827"><Icon name="link" :size="16" /></span>
+                <div class="st-card-meta">
+                  <div class="st-card-name">
+                    <span>X (Twitter Profile)</span>
+                    <span v-if="channelTokens.x_profile" class="st-pill ok">Configured</span>
+                    <span v-else class="st-pill">Not set</span>
+                  </div>
+                  <div class="st-card-path">Used for X API v2 public_metrics (impressions, likes, replies)</div>
+                </div>
+              </div>
+            </div>
+            <div class="st-card-foot" style="flex-direction: column; align-items: stretch; gap: 8px">
+              <div style="display: flex; gap: 8px">
+                <input
+                  v-model="tokenInputs.x_profile"
+                  type="password"
+                  class="input"
+                  style="flex: 1"
+                  placeholder="Paste X Bearer Token (AAAA...)"
+                />
+                <button
+                  class="btn btn-sm btn-primary"
+                  :disabled="savingTokens.x_profile"
+                  @click="saveToken('x_profile')"
+                >
+                  {{ savingTokens.x_profile ? "Saving…" : "Save" }}
+                </button>
+              </div>
+              <span v-if="tokenMessages.x_profile" class="st-hint" style="color: #059669">
+                {{ tokenMessages.x_profile }}
+              </span>
             </div>
           </div>
         </div>

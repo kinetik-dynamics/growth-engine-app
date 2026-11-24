@@ -1,3 +1,4 @@
+mod analytics;
 mod api;
 mod cli;
 mod db;
@@ -133,7 +134,28 @@ async fn site_page(app: AppHandle, page: String) -> Result<Value, String> {
         return Err(format!("Unknown page: {page}"));
     }
     let config = signed_in(&app)?;
-    api::get(&config.session.base_url, &config.token, &format!("/api/app/{page}")).await
+    let mut result = api::get(&config.session.base_url, &config.token, &format!("/api/app/{page}")).await?;
+    if page == "publish" {
+        if let Ok(conn) = store::database(&app) {
+            if let Some(posts) = result["posts"].as_array_mut() {
+                for post in posts {
+                    if let Some(post_id) = post["id"].as_str() {
+                        if let Ok(Some((pid, url))) = db::get_post_platform_id(&conn, post_id) {
+                            if post["platformPostId"].is_null() && post["platform_post_id"].is_null() {
+                                post["platformPostId"] = Value::String(pid);
+                            }
+                            if post["postUrl"].is_null() && post["post_url"].is_null() {
+                                if let Some(url) = url {
+                                    post["postUrl"] = Value::String(url);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(result)
 }
 
 #[tauri::command]
@@ -963,6 +985,54 @@ async fn draw_cover_images(app: &AppHandle, api: &image::ImageApi, ideas: Vec<Id
     drawn
 }
 
+#[tauri::command]
+async fn fetch_post_analytics(
+    app: AppHandle,
+    post_id: String,
+    channel_id: String,
+    platform_post_id: Option<String>,
+    post_url: Option<String>,
+) -> Result<analytics::PostAnalytics, String> {
+    analytics::fetch_post_analytics(app, post_id, channel_id, platform_post_id, post_url).await
+}
+
+#[tauri::command]
+fn get_post_analytics(app: AppHandle, post_id: String) -> Result<Option<analytics::PostAnalytics>, String> {
+    let conn = store::database(&app)?;
+    db::get_post_analytics(&conn, &post_id)
+}
+
+#[tauri::command]
+fn set_post_platform_id(app: AppHandle, post_id: String, platform_post_id: String, post_url: Option<String>) -> Result<(), String> {
+    let conn = store::database(&app)?;
+    db::set_post_platform_id(&conn, &post_id, &platform_post_id, post_url.as_deref())
+}
+
+#[tauri::command]
+fn get_channel_tokens(app: AppHandle) -> Result<std::collections::HashMap<String, String>, String> {
+    let conn = store::database(&app)?;
+    let mut tokens = std::collections::HashMap::new();
+    let mut stmt = conn
+        .prepare("SELECT key, value FROM settings WHERE key LIKE 'channel_token:%'")
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+        .map_err(|e| e.to_string())?;
+    for row in rows.flatten() {
+        if let Some(channel_id) = row.0.strip_prefix("channel_token:") {
+            tokens.insert(channel_id.to_string(), row.1);
+        }
+    }
+    Ok(tokens)
+}
+
+#[tauri::command]
+fn save_channel_token(app: AppHandle, channel_id: String, token: String) -> Result<(), String> {
+    let conn = store::database(&app)?;
+    let val = if token.trim().is_empty() { None } else { Some(token.trim()) };
+    db::set_setting(&conn, &format!("channel_token:{channel_id}"), val)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -1022,7 +1092,12 @@ pub fn run() {
             update_offer_draft,
             delete_offer_draft,
             generate_offers,
-            sync_offer_drafts
+            sync_offer_drafts,
+            fetch_post_analytics,
+            get_post_analytics,
+            set_post_platform_id,
+            get_channel_tokens,
+            save_channel_token
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

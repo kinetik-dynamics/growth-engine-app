@@ -356,6 +356,38 @@ export interface SitePost {
   siblingPostIds: string[];
   tag: string | null;
   pattern: string | null;
+  platformPostId?: string | null;
+  postUrl?: string | null;
+}
+
+export interface MetricValue {
+  value: number | null;
+  formatted: string;
+  available: boolean;
+  unavailableReason?: string | null;
+}
+
+export interface PostComment {
+  id: string;
+  author: string;
+  authorAvatar?: string | null;
+  text: string;
+  createdAt?: string | null;
+}
+
+export interface PostAnalytics {
+  postId: string;
+  platformPostId: string | null;
+  postUrl: string | null;
+  channelId: string;
+  platform: string;
+  impressions: MetricValue;
+  views: MetricValue;
+  likes: MetricValue;
+  comments: MetricValue;
+  latestComments: PostComment[];
+  lastUpdated: number;
+  error?: string | null;
 }
 
 export interface SitePages {
@@ -428,6 +460,18 @@ export const api = {
   deleteOfferDraft: (id: string) => invoke<void>("delete_offer_draft", { id }),
   /** Puts every draft not synced yet on the main site; resolves to how many went. */
   syncOfferDrafts: () => invoke<number>("sync_offer_drafts"),
+  fetchPostAnalytics: (postId: string, channelId: string, platformPostId?: string | null, postUrl?: string | null) =>
+    invoke<PostAnalytics>("fetch_post_analytics", {
+      postId,
+      channelId,
+      platformPostId: platformPostId ?? null,
+      postUrl: postUrl ?? null,
+    }),
+  getPostAnalytics: (postId: string) => invoke<PostAnalytics | null>("get_post_analytics", { postId }),
+  setPostPlatformId: (postId: string, platformPostId: string, postUrl?: string | null) =>
+    invoke<void>("set_post_platform_id", { postId, platformPostId, postUrl: postUrl ?? null }),
+  getChannelTokens: () => invoke<Record<string, string>>("get_channel_tokens"),
+  saveChannelToken: (channelId: string, token: string) => invoke<void>("save_channel_token", { channelId, token }),
 };
 
 /** Tauri commands reject with a plain string; anything else is unexpected. */

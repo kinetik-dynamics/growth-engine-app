@@ -4,6 +4,7 @@ import type { PublishChannel, SitePost } from "../api";
 import { editPath, publishTabPath } from "../publish";
 import Icon from "./Icon.vue";
 import PlatformIcon from "./PlatformIcon.vue";
+import PostAnalyticsBar from "./PostAnalyticsBar.vue";
 
 const props = defineProps<{ post: SitePost; channels: PublishChannel[] }>();
 const emit = defineEmits<{ open: [post: SitePost]; web: [path: string] }>();
@@ -37,6 +38,8 @@ const tabPath = computed(() => publishTabPath(props.post));
     <div v-if="post.status === 'Failed' && post.errorMessage" class="pc-error">
       <Icon name="alertCircle" :size="14" /> <span>Failed: {{ post.errorMessage }}</span>
     </div>
+
+    <PostAnalyticsBar v-if="post.status === 'Sent'" :post="post" />
 
     <div class="pc-actions" @click.stop>
       <div class="pc-actions-left">

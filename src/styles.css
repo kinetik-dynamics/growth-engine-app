@@ -1229,3 +1229,63 @@ textarea.input.prose { font-family: inherit; font-size: 14px; }
 .wp-planned-text b { color: #111827; font-weight: 600; }
 .wp-planned-topic { font-size: 11px; color: #4b5563; overflow-wrap: anywhere; }
 .cp-planned { font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; padding: 1px 5px; border-radius: 4px; background: #dbeafe; color: #1d4ed8; margin-left: 6px; vertical-align: 1px; }
+
+/* Post Analytics Bar (Card) */
+.pab { margin-top: 8px; padding-top: 8px; border-top: 1px solid #f3f4f6; display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 11px; color: #4b5563; cursor: default; }
+.pab-metrics { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.pab-item { display: inline-flex; align-items: center; gap: 4px; font-variant-numeric: tabular-nums; }
+.pab-item.unavailable { opacity: 0.65; cursor: help; }
+.pab-icon { display: flex; align-items: center; color: #6b7280; }
+.pab-label { color: #9ca3af; font-size: 10px; text-transform: uppercase; letter-spacing: 0.02em; }
+.pab-value { font-weight: 600; color: #1f2937; }
+.pab-meta { display: flex; align-items: center; gap: 6px; flex: none; }
+.pab-time { font-size: 10px; color: #9ca3af; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.pab-refresh { width: 22px; height: 22px; display: grid; place-items: center; border: 0; border-radius: 4px; background: transparent; color: #9ca3af; cursor: pointer; padding: 0; transition: all 0.15s; }
+.pab-refresh:hover:not(:disabled) { background: #e5e7eb; color: #111827; }
+.pab-refresh.spinning svg { animation: spin 1s linear infinite; }
+
+/* Full Post Analytics View (Drawer & Modal) */
+.pa { background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 8px; padding: 14px; display: flex; flex-direction: column; gap: 12px; }
+.pa-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.pa-header-left { display: flex; align-items: center; gap: 8px; }
+.pa-title { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: #4b5563; display: flex; align-items: center; gap: 6px; margin: 0; }
+.pa-updated { font-size: 11px; color: #9ca3af; font-variant-numeric: tabular-nums; }
+.pa-btn-refresh { display: inline-flex; align-items: center; gap: 4px; padding: 4px 8px; font-size: 11px; font-weight: 500; border: 1px solid #e5e7eb; border-radius: 4px; background: #fff; color: #374151; cursor: pointer; transition: background-color 0.15s; }
+.pa-btn-refresh:hover:not(:disabled) { background: #f3f4f6; color: #111827; }
+.pa-btn-refresh.spinning svg { animation: spin 1s linear infinite; }
+.pa-banner { display: flex; align-items: center; gap: 6px; padding: 6px 10px; border-radius: 4px; font-size: 11px; font-weight: 500; }
+.pa-banner-warning { background: #fffbeb; border: 1px solid #fef3c7; color: #92400e; }
+.pa-banner-warning svg { color: #d97706; flex: none; }
+.pa-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+.pa-card { background: #fff; border: 1px solid #e5e7eb; border-radius: 6px; padding: 10px; display: flex; flex-direction: column; gap: 4px; transition: border-color 0.15s; }
+.pa-card.unavailable { background: #fafafa; border-color: #f3f4f6; }
+.pa-card-head { display: flex; align-items: center; justify-content: space-between; font-size: 11px; color: #6b7280; font-weight: 500; }
+.pa-card-icon { display: flex; align-items: center; justify-content: center; width: 22px; height: 22px; border-radius: 4px; }
+.pa-card-icon.icon-impr { background: #eff6ff; color: #2563eb; }
+.pa-card-icon.icon-views { background: #f0fdf4; color: #16a34a; }
+.pa-card-icon.icon-likes { background: #fff1f2; color: #e11d48; }
+.pa-card-icon.icon-comments { background: #faf5ff; color: #9333ea; }
+.pa-card-value { font-size: 18px; font-weight: 700; color: #111827; font-variant-numeric: tabular-nums; line-height: 1.2; }
+.pa-card-note { font-size: 10px; color: #9ca3af; line-height: 1.3; margin-top: 2px; }
+.pa-postid-box { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding-top: 10px; border-top: 1px solid #e5e7eb; font-size: 11px; }
+.pa-postid-info { display: flex; align-items: center; gap: 6px; min-width: 0; overflow: hidden; }
+.pa-postid-label { color: #6b7280; flex: none; font-weight: 500; }
+.pa-postid-code { background: #f3f4f6; padding: 2px 6px; border-radius: 3px; font-size: 11px; color: #1f2937; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pa-postid-missing { color: #9ca3af; font-style: italic; }
+.pa-postid-actions { display: flex; align-items: center; gap: 6px; flex: none; }
+.pa-btn-link, .pa-btn-edit { display: inline-flex; align-items: center; gap: 4px; padding: 3px 8px; border: 1px solid #e5e7eb; border-radius: 4px; background: #fff; font-size: 11px; font-weight: 500; color: #374151; cursor: pointer; transition: all 0.15s; }
+.pa-btn-link:hover, .pa-btn-edit:hover { background: #f9fafb; color: #111827; }
+.pa-edit-form { background: #fff; border: 1px solid #bfdbfe; border-radius: 6px; padding: 10px; display: flex; flex-direction: column; gap: 6px; }
+.pa-edit-label { font-size: 11px; font-weight: 600; color: #1e40af; }
+.pa-edit-row { display: flex; gap: 6px; align-items: center; }
+.pa-edit-input { flex: 1; height: 28px; font-size: 12px; }
+.pa-edit-hint { font-size: 10px; color: #6b7280; margin: 0; }
+.pa-comments-section { padding-top: 10px; border-top: 1px solid #e5e7eb; display: flex; flex-direction: column; gap: 6px; }
+.pa-comments-title { font-size: 11px; font-weight: 600; color: #4b5563; display: flex; align-items: center; gap: 4px; margin: 0; }
+.pa-comments-list { display: flex; flex-direction: column; gap: 6px; max-height: 160px; overflow-y: auto; }
+.pa-comment-card { background: #fff; border: 1px solid #e5e7eb; border-radius: 4px; padding: 8px 10px; font-size: 11px; }
+.pa-comment-head { display: flex; justify-content: space-between; margin-bottom: 2px; }
+.pa-comment-author { font-weight: 600; color: #111827; }
+.pa-comment-date { color: #9ca3af; font-size: 10px; }
+.pa-comment-text { color: #374151; line-height: 1.4; }
+

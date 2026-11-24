@@ -3,6 +3,7 @@ import { computed, onMounted, onUnmounted } from "vue";
 import type { PublishChannel, SitePost } from "../api";
 import { editPath, publishTabPath } from "../publish";
 import Icon from "./Icon.vue";
+import PostAnalytics from "./PostAnalytics.vue";
 
 const props = defineProps<{ post: SitePost; channels: PublishChannel[]; posts: SitePost[] }>();
 const emit = defineEmits<{ close: []; select: [post: SitePost]; web: [path: string] }>();
@@ -68,6 +69,15 @@ onUnmounted(() => window.removeEventListener("keydown", onKey));
             <b>{{ post.tag }}</b>
           </div>
         </div>
+
+        <PostAnalytics
+          v-if="post.status === 'Sent'"
+          :post-id="post.id"
+          :channel-id="post.channelId"
+          :channel-platform="channel?.platform"
+          :initial-platform-post-id="post.platformPostId"
+          :initial-post-url="post.postUrl"
+        />
 
         <div v-if="post.status === 'Failed' && post.errorMessage" class="pc-error">
           <Icon name="alertCircle" :size="14" /> <span>Failed: {{ post.errorMessage }}</span>

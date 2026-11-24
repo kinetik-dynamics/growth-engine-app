@@ -292,6 +292,28 @@ CREATE TABLE IF NOT EXISTS offer_drafts (
     synced_at      INTEGER,
     remote_id      INTEGER
 );
+CREATE TABLE IF NOT EXISTS post_analytics (
+    post_id             TEXT PRIMARY KEY,
+    platform_post_id    TEXT,
+    post_url            TEXT,
+    channel_id          TEXT NOT NULL,
+    platform            TEXT NOT NULL DEFAULT '',
+    impressions         INTEGER,
+    impressions_avail   INTEGER NOT NULL DEFAULT 1,
+    impressions_note    TEXT,
+    views               INTEGER,
+    views_avail         INTEGER NOT NULL DEFAULT 1,
+    views_note          TEXT,
+    likes               INTEGER,
+    likes_avail         INTEGER NOT NULL DEFAULT 1,
+    likes_note          TEXT,
+    comments_count      INTEGER,
+    comments_avail      INTEGER NOT NULL DEFAULT 1,
+    comments_note       TEXT,
+    latest_comments     TEXT NOT NULL DEFAULT '[]',
+    last_updated        INTEGER NOT NULL,
+    error               TEXT
+);
 ";
 
 const IDEA_COLUMNS: &str = "id, title, short_notes, pain_addressed, target_keyword, pattern, tag, source, \
@@ -920,6 +942,154 @@ pub fn mark_offer_synced(conn: &Connection, id: &str, remote_id: Option<i64>, sy
     .map_err(describe)
 }
 
+pub fn get_post_analytics(conn: &Connection, post_id: &str) -> Result<Option<crate::analytics::PostAnalytics>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT post_id, platform_post_id, post_url, channel_id, platform, \
+             impressions, impressions_avail, impressions_note, \
+             views, views_avail, views_note, \
+             likes, likes_avail, likes_note, \
+             comments_count, comments_avail, comments_note, \
+             latest_comments, last_updated, error \
+             FROM post_analytics WHERE post_id = ?1",
+        )
+        .map_err(describe)?;
+
+    let mut rows = stmt.query(params![post_id]).map_err(describe)?;
+    if let Some(row) = rows.next().map_err(describe)? {
+        let impressions_val: Option<i64> = row.get(5).ok();
+        let impressions_avail: i64 = row.get(6).unwrap_or(0);
+        let impressions_note: Option<String> = row.get(7).ok();
+
+        let views_val: Option<i64> = row.get(8).ok();
+        let views_avail: i64 = row.get(9).unwrap_or(0);
+        let views_note: Option<String> = row.get(10).ok();
+
+        let likes_val: Option<i64> = row.get(11).ok();
+        let likes_avail: i64 = row.get(12).unwrap_or(0);
+        let likes_note: Option<String> = row.get(13).ok();
+
+        let comments_val: Option<i64> = row.get(14).ok();
+        let comments_avail: i64 = row.get(15).unwrap_or(0);
+        let comments_note: Option<String> = row.get(16).ok();
+
+        let latest_comments_raw: String = row.get(17).unwrap_or_else(|_| "[]".to_string());
+        let latest_comments: Vec<crate::analytics::PostComment> =
+            serde_json::from_str(&latest_comments_raw).unwrap_or_default();
+
+        let make_metric = |val: Option<i64>, avail: bool, note: Option<String>| {
+            if avail && val.is_some() {
+                crate::analytics::MetricValue::available(val.unwrap())
+            } else {
+                crate::analytics::MetricValue::unavailable(note.unwrap_or_else(|| "Unavailable".into()))
+            }
+        };
+
+        Ok(Some(crate::analytics::PostAnalytics {
+            post_id: row.get(0).map_err(describe)?,
+            platform_post_id: row.get(1).ok(),
+            post_url: row.get(2).ok(),
+            channel_id: row.get(3).map_err(describe)?,
+            platform: row.get(4).unwrap_or_else(|_| "".to_string()),
+            impressions: make_metric(impressions_val, impressions_avail == 1, impressions_note),
+            views: make_metric(views_val, views_avail == 1, views_note),
+            likes: make_metric(likes_val, likes_avail == 1, likes_note),
+            comments: make_metric(comments_val, comments_avail == 1, comments_note),
+            latest_comments,
+            last_updated: row.get::<_, i64>(18).unwrap_or(0) as u64,
+            error: row.get(19).ok(),
+        }))
+    } else {
+        Ok(None)
+    }
+}
+
+pub fn save_post_analytics(conn: &Connection, analytics: &crate::analytics::PostAnalytics) -> Result<(), String> {
+    let latest_comments_raw = serde_json::to_string(&analytics.latest_comments).unwrap_or_else(|_| "[]".to_string());
+    conn.execute(
+        "INSERT INTO post_analytics (
+            post_id, platform_post_id, post_url, channel_id, platform,
+            impressions, impressions_avail, impressions_note,
+            views, views_avail, views_note,
+            likes, likes_avail, likes_note,
+            comments_count, comments_avail, comments_note,
+            latest_comments, last_updated, error
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)
+        ON CONFLICT(post_id) DO UPDATE SET
+            platform_post_id = excluded.platform_post_id,
+            post_url = COALESCE(excluded.post_url, post_analytics.post_url),
+            channel_id = excluded.channel_id,
+            platform = excluded.platform,
+            impressions = excluded.impressions,
+            impressions_avail = excluded.impressions_avail,
+            impressions_note = excluded.impressions_note,
+            views = excluded.views,
+            views_avail = excluded.views_avail,
+            views_note = excluded.views_note,
+            likes = excluded.likes,
+            likes_avail = excluded.likes_avail,
+            likes_note = excluded.likes_note,
+            comments_count = excluded.comments_count,
+            comments_avail = excluded.comments_avail,
+            comments_note = excluded.comments_note,
+            latest_comments = excluded.latest_comments,
+            last_updated = excluded.last_updated,
+            error = excluded.error",
+        params![
+            analytics.post_id,
+            analytics.platform_post_id,
+            analytics.post_url,
+            analytics.channel_id,
+            analytics.platform,
+            analytics.impressions.value,
+            if analytics.impressions.available { 1 } else { 0 },
+            analytics.impressions.unavailable_reason,
+            analytics.views.value,
+            if analytics.views.available { 1 } else { 0 },
+            analytics.views.unavailable_reason,
+            analytics.likes.value,
+            if analytics.likes.available { 1 } else { 0 },
+            analytics.likes.unavailable_reason,
+            analytics.comments.value,
+            if analytics.comments.available { 1 } else { 0 },
+            analytics.comments.unavailable_reason,
+            latest_comments_raw,
+            analytics.last_updated as i64,
+            analytics.error,
+        ],
+    )
+    .map(|_| ())
+    .map_err(describe)
+}
+
+pub fn set_post_platform_id(conn: &Connection, post_id: &str, platform_post_id: &str, post_url: Option<&str>) -> Result<(), String> {
+    conn.execute(
+        "INSERT INTO post_analytics (post_id, platform_post_id, post_url, channel_id, platform, last_updated)
+         VALUES (?1, ?2, ?3, '', '', 0)
+         ON CONFLICT(post_id) DO UPDATE SET
+            platform_post_id = excluded.platform_post_id,
+            post_url = COALESCE(excluded.post_url, post_analytics.post_url)",
+        params![post_id, platform_post_id, post_url],
+    )
+    .map(|_| ())
+    .map_err(describe)
+}
+
+pub fn get_post_platform_id(conn: &Connection, post_id: &str) -> Result<Option<(String, Option<String>)>, String> {
+    let mut stmt = conn
+        .prepare("SELECT platform_post_id, post_url FROM post_analytics WHERE post_id = ?1")
+        .map_err(describe)?;
+    let mut rows = stmt.query(params![post_id]).map_err(describe)?;
+    if let Some(row) = rows.next().map_err(describe)? {
+        let pid: Option<String> = row.get(0).ok();
+        let url: Option<String> = row.get(1).ok();
+        if let Some(pid) = pid.filter(|s| !s.trim().is_empty()) {
+            return Ok(Some((pid, url)));
+        }
+    }
+    Ok(None)
+}
+
 /// One-time move of ideas from the pre-SQLite ideas.json into the database.
 /// The file is renamed afterwards so it is only imported once.
 pub fn import_legacy_json(conn: &mut Connection, json_path: &Path) -> Result<usize, String> {
@@ -1326,5 +1496,55 @@ mod tests {
         assert_eq!(get_offer_draft(&conn, "b").unwrap().remote_id, Some(77));
         assert_eq!(offer_draft_names(&conn).unwrap().len(), 2);
         assert!(get_offer_draft(&conn, "c").unwrap_err().contains("no longer exists"));
+    }
+
+    #[test]
+    fn post_analytics_round_trips_and_updates_on_conflict() {
+        let conn = memory_db();
+        let initial = crate::analytics::PostAnalytics {
+            post_id: "post-1".into(),
+            platform_post_id: Some("urn:li:share:123".into()),
+            post_url: Some("https://linkedin.com/...".into()),
+            channel_id: "linkedin_personal".into(),
+            platform: "LinkedIn".into(),
+            impressions: crate::analytics::MetricValue::available(120),
+            views: crate::analytics::MetricValue::available(95),
+            likes: crate::analytics::MetricValue::available(10),
+            comments: crate::analytics::MetricValue::available(2),
+            latest_comments: vec![crate::analytics::PostComment {
+                id: "c1".into(),
+                author: "Alice".into(),
+                author_avatar: None,
+                text: "Nice!".into(),
+                created_at: None,
+            }],
+            last_updated: 5000,
+            error: None,
+        };
+
+        save_post_analytics(&conn, &initial).unwrap();
+        let retrieved = get_post_analytics(&conn, "post-1").unwrap().unwrap();
+        assert_eq!(retrieved, initial);
+
+        // Update with fresh metrics
+        let mut updated = initial.clone();
+        updated.likes = crate::analytics::MetricValue::available(15);
+        updated.last_updated = 6000;
+        save_post_analytics(&conn, &updated).unwrap();
+
+        let retrieved_updated = get_post_analytics(&conn, "post-1").unwrap().unwrap();
+        assert_eq!(retrieved_updated.likes.value, Some(15));
+        assert_eq!(retrieved_updated.last_updated, 6000);
+    }
+
+    #[test]
+    fn post_platform_id_can_be_set_and_retrieved() {
+        let conn = memory_db();
+        assert_eq!(get_post_platform_id(&conn, "post-42").unwrap(), None);
+
+        set_post_platform_id(&conn, "post-42", "urn:li:activity:999", Some("https://linkedin.com/feed")).unwrap();
+        let (pid, url) = get_post_platform_id(&conn, "post-42").unwrap().unwrap();
+        assert_eq!(pid, "urn:li:activity:999");
+        assert_eq!(url.as_deref(), Some("https://linkedin.com/feed"));
     }
 }
