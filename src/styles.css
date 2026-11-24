@@ -366,6 +366,7 @@ textarea.input.prose { font-family: inherit; font-size: 14px; }
 /* Brain pages (mirrors the web app's Offers/ICPs/Proof layout) */
 .bp { max-width: 1152px; margin: 0 auto; padding: 24px; display: flex; flex-direction: column; gap: 20px; }
 .bp button { font: inherit; color: inherit; }
+.bp .iv-plan { color: #fff; }
 .bp-header { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 16px; }
 .bp-h1 { font-size: 16px; line-height: 24px; font-weight: 600; color: #111827; }
 .bp-btn { display: inline-flex; align-items: center; gap: 6px; font-size: 12px !important; line-height: 16px; font-weight: 500; padding: 6px 12px; border-radius: 6px; border: 1px solid #e5e7eb; background: #fff; color: #374151 !important; cursor: pointer; transition: background-color 0.15s; }
