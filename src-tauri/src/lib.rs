@@ -2,6 +2,7 @@ mod api;
 mod cli;
 mod db;
 mod image;
+mod offers;
 mod plan;
 mod store;
 
@@ -621,20 +622,7 @@ async fn generate_plan(app: AppHandle, request: plan::PlanRequest) -> Result<Pla
     }
 
     report(&app, "stage", format!("Started {agent}. Waiting for it to write {} ideas…", request.slots.len()));
-    let workspace = store::workspace_dir(&app)?;
-    let provider = request.provider.clone();
-    let progress_app = app.clone();
-    let run = tauri::async_runtime::spawn_blocking(move || {
-        let options = cli::RunOptions {
-            cwd: &workspace,
-            timeout: PLAN_TIMEOUT,
-            allowed_tools: &allowed_tools,
-            cancel: Some(&CANCEL_PLAN),
-        };
-        cli::prompt(&provider, &prompt, &options, &mut |progress| report_progress(&progress_app, progress))
-    })
-    .await
-    .map_err(|e| e.to_string())??;
+    let run = run_agent(&app, &request.provider, prompt, allowed_tools).await?;
 
     report(&app, "stage", format!("{agent} finished. Reading the ideas"));
     let drafted = match plan::parse_ideas(&run.text) {
@@ -681,6 +669,231 @@ async fn generate_plan(app: AppHandle, request: plan::PlanRequest) -> Result<Pla
         None => ideas,
     };
     Ok(PlanOutcome::Created { ideas })
+}
+
+/// Runs `prompt` through the provider's CLI in the app folder, reporting its
+/// progress as `plan-progress` events. `cancel_plan` stops it.
+async fn run_agent(app: &AppHandle, provider: &str, prompt: String, allowed_tools: Vec<String>) -> Result<cli::RunResult, String> {
+    let workspace = store::workspace_dir(app)?;
+    let provider = provider.to_string();
+    let progress_app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let options = cli::RunOptions {
+            cwd: &workspace,
+            timeout: PLAN_TIMEOUT,
+            allowed_tools: &allowed_tools,
+            cancel: Some(&CANCEL_PLAN),
+        };
+        cli::prompt(&provider, &prompt, &options, &mut |progress| report_progress(&progress_app, progress))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/* Offers drafted by the AI agent */
+
+#[derive(Serialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+enum OfferOutcome {
+    Created { offers: Vec<db::OfferDraft> },
+    /// The agent was refused tools and returned no usable offers.
+    PermissionNeeded { provider: String, tools: Vec<String> },
+}
+
+/// How many pages of the site's offers are read to tell the agent what exists.
+const MAX_OFFER_PAGES: u32 = 5;
+
+/// The names of the offers already on the main site.
+async fn site_offer_names(config: &Config) -> Result<Vec<String>, String> {
+    let mut names = Vec::new();
+    for page in 1..=MAX_OFFER_PAGES {
+        let query = [("page", page.to_string()), ("per_page", "50".to_string()), ("sort", "drafted".to_string())];
+        let result = api::get_query(&config.session.base_url, &config.token, "/api/offers", &query).await?;
+        names.extend(result["offers"].as_array().into_iter().flatten().filter_map(|offer| text(&offer["name"])));
+        if result["meta"]["last_page"].as_u64().unwrap_or(1) <= page as u64 {
+            break;
+        }
+    }
+    Ok(names)
+}
+
+/// The `id`s of the items in `list`.
+fn ids_of(list: &[Value]) -> Vec<i64> {
+    list.iter().filter_map(|item| item["id"].as_i64()).collect()
+}
+
+#[tauri::command]
+fn list_offer_drafts(app: AppHandle) -> Result<Vec<db::OfferDraft>, String> {
+    db::pending_offer_drafts(&store::database(&app)?)
+}
+
+#[tauri::command]
+fn update_offer_draft(app: AppHandle, mut draft: db::OfferDraftEdit) -> Result<db::OfferDraft, String> {
+    draft.name = draft.name.trim().to_string();
+    draft.promise = draft.promise.trim().to_string();
+    if draft.name.is_empty() {
+        return Err("The offer needs a name.".into());
+    }
+    if draft.promise.is_empty() {
+        return Err("The offer needs a promise.".into());
+    }
+    draft.deliverables = draft.deliverables.iter().map(|item| item.trim().to_string()).filter(|item| !item.is_empty()).collect();
+    db::update_offer_draft(&store::database(&app)?, &draft, now_ms())
+}
+
+#[tauri::command]
+fn delete_offer_draft(app: AppHandle, id: String) -> Result<(), String> {
+    db::delete_offer_draft(&store::database(&app)?, &id)
+}
+
+/// Asks the chosen AI CLI for new offers, based on the company overview,
+/// the ICPs and the case studies on the main site, and keeps them as local
+/// drafts until they are synced. Progress is emitted as `plan-progress`.
+#[tauri::command]
+async fn generate_offers(app: AppHandle, request: offers::OfferRequest) -> Result<OfferOutcome, String> {
+    if request.count == 0 || request.count > offers::MAX_OFFERS {
+        return Err(format!("Ask for 1 to {} offers.", offers::MAX_OFFERS));
+    }
+    CANCEL_PLAN.store(false, Ordering::Relaxed);
+    let config = signed_in(&app)?;
+    let base_url = &config.session.base_url;
+    let agent = cli::provider_name(&request.provider);
+
+    report(&app, "stage", format!("Loading the company overview, ICPs and case studies from {base_url}"));
+    let company = api::get(base_url, &config.token, "/api/me").await?["company"].clone();
+    if company.is_null() {
+        return Err("The main site has no company profile yet. Finish onboarding there first.".into());
+    }
+    let icps = api::get(base_url, &config.token, "/api/app/icps").await?["icps"].as_array().cloned().unwrap_or_default();
+    let proof = api::get(base_url, &config.token, "/api/app/proof").await?["proof"].as_array().cloned().unwrap_or_default();
+    let mut existing = site_offer_names(&config).await?;
+
+    let (allowed_tools, drafted_names) = {
+        let conn = store::database(&app)?;
+        (db::allowed_tools(&conn, &request.provider)?, db::offer_draft_names(&conn)?)
+    };
+    for name in drafted_names {
+        if !existing.iter().any(|known| known.eq_ignore_ascii_case(&name)) {
+            existing.push(name);
+        }
+    }
+
+    let prompt = offers::build_prompt(
+        &company,
+        &offers::brief_icps(&icps),
+        &offers::brief_case_studies(&proof),
+        &existing,
+        request.count,
+        request.focus(),
+    );
+    report(
+        &app,
+        "stage",
+        format!(
+            "Built the brief: {} ICPs, {} case studies, {} existing offers ({} characters)",
+            icps.len(),
+            proof.len(),
+            existing.len(),
+            prompt.chars().count()
+        ),
+    );
+    if !allowed_tools.is_empty() {
+        report(&app, "stage", format!("{agent} may use: {}", allowed_tools.join(", ")));
+    }
+
+    report(&app, "stage", format!("Started {agent}. Waiting for it to draft {} offers…", request.count));
+    let run = run_agent(&app, &request.provider, prompt, allowed_tools).await?;
+
+    report(&app, "stage", format!("{agent} finished. Reading the offers"));
+    let drafted = match offers::parse_offers(&run.text) {
+        Ok(drafted) => drafted,
+        Err(_) if !run.denied.is_empty() => {
+            return Ok(OfferOutcome::PermissionNeeded { provider: request.provider, tools: run.denied });
+        }
+        Err(error) => return Err(error),
+    };
+
+    // Only ids the site sent may be linked; the agent can invent others.
+    let (icp_ids, proof_ids) = (ids_of(&icps), ids_of(&proof));
+    let created_at = now_ms();
+    let drafts: Vec<db::OfferDraft> = drafted
+        .into_iter()
+        .take(request.count as usize)
+        .enumerate()
+        .map(|(index, offer)| db::OfferDraft {
+            id: format!("offer-{created_at}-{index}"),
+            name: offer.name.trim().to_string(),
+            promise: offer.promise.trim().to_string(),
+            description: offer.description.trim().to_string(),
+            price_range: offer.price_range.trim().to_string(),
+            timeline: offer.timeline.trim().to_string(),
+            deliverables: offer.deliverables.iter().map(|item| item.trim().to_string()).filter(|item| !item.is_empty()).collect(),
+            icp_ids: offer.icp_ids.into_iter().filter(|id| icp_ids.contains(id)).collect(),
+            case_study_ids: offer.case_study_ids.into_iter().filter(|id| proof_ids.contains(id)).collect(),
+            rationale: offer.rationale.trim().to_string(),
+            provider: Some(request.provider.clone()),
+            created_at,
+            updated_at: created_at,
+            synced_at: None,
+            remote_id: None,
+        })
+        .collect();
+
+    db::insert_offer_drafts(&mut store::database(&app)?, &drafts)?;
+    report(&app, "stage", format!("Saved {} offers as drafts", drafts.len()));
+    Ok(OfferOutcome::Created { offers: drafts })
+}
+
+/// How many offers go to the main site in one request (its limit is 50).
+const OFFERS_PER_SYNC: usize = 25;
+
+/// Puts every offer draft not synced yet on the main site. The app's id
+/// travels with each one, so a sync that is cut short can safely run again.
+/// Returns how many were synced.
+#[tauri::command]
+async fn sync_offer_drafts(app: AppHandle) -> Result<usize, String> {
+    let config = signed_in(&app)?;
+    let drafts = db::pending_offer_drafts(&store::database(&app)?)?;
+    if drafts.is_empty() {
+        return Err("There are no new offers to sync.".into());
+    }
+    let blank = |value: &str| (!value.trim().is_empty()).then(|| value.trim().to_string());
+
+    let mut synced = 0;
+    for chunk in drafts.chunks(OFFERS_PER_SYNC) {
+        let body = serde_json::json!({
+            "offers": chunk.iter().map(|draft| serde_json::json!({
+                "external_id": draft.id,
+                "name": draft.name,
+                "promise": draft.promise,
+                "description": blank(&draft.description),
+                "price_range": blank(&draft.price_range),
+                "timeline": blank(&draft.timeline),
+                "deliverables": draft.deliverables,
+                "icp_ids": draft.icp_ids,
+                "case_study_ids": draft.case_study_ids,
+            })).collect::<Vec<_>>(),
+        });
+        let response = api::post(&config.session.base_url, &config.token, "/api/offers/sync", &body)
+            .await
+            .map_err(|error| {
+                if error.contains(" 404 ") || error.contains(" 405 ") {
+                    "The main site can't take offers from the app yet. Update it to the latest version, then sync again.".to_string()
+                } else {
+                    error
+                }
+            })?;
+
+        let conn = store::database(&app)?;
+        let synced_at = now_ms();
+        for item in response["offers"].as_array().into_iter().flatten() {
+            if let Some(id) = item["external_id"].as_str() {
+                db::mark_offer_synced(&conn, id, item["id"].as_i64(), synced_at)?;
+                synced += 1;
+            }
+        }
+    }
+    Ok(synced)
 }
 
 /// The distinct skills a plan uses, and for each slot the index of its
@@ -795,7 +1008,12 @@ pub fn run() {
             publish_idea,
             publish_ideas,
             cancel_plan,
-            generate_plan
+            generate_plan,
+            list_offer_drafts,
+            update_offer_draft,
+            delete_offer_draft,
+            generate_offers,
+            sync_offer_drafts
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

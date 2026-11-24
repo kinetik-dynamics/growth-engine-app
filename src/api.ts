@@ -43,6 +43,44 @@ export interface OfferPage {
   icp_options: { id: number; name: string }[];
 }
 
+/** An offer the AI agent drafted, kept in the app until it is synced to the main site. */
+export interface OfferDraft {
+  id: string;
+  name: string;
+  promise: string;
+  description: string;
+  priceRange: string;
+  timeline: string;
+  deliverables: string[];
+  /** Ids of the main site's ICPs this offer is for. */
+  icpIds: number[];
+  /** Ids of the main site's case studies that prove it. */
+  caseStudyIds: number[];
+  /** Why the agent picked this offer. */
+  rationale: string;
+  provider: string | null;
+  createdAt: number;
+  updatedAt: number;
+  syncedAt: number | null;
+  remoteId: number | null;
+}
+
+export type OfferDraftEdit = Pick<
+  OfferDraft,
+  "id" | "name" | "promise" | "description" | "priceRange" | "timeline" | "deliverables" | "icpIds" | "caseStudyIds"
+>;
+
+export interface OfferRequest {
+  provider: string;
+  count: number;
+  /** Optional steer for the agent; blank lets it pick from all the material. */
+  focus: string;
+}
+
+export type OfferOutcome =
+  | { kind: "created"; offers: OfferDraft[] }
+  | { kind: "permissionNeeded"; provider: string; tools: string[] };
+
 export type IdeaTab = "drafts" | "sent";
 
 /** One page of the local ideas, latest first, plus the totals of both tabs. */
@@ -382,6 +420,13 @@ export const api = {
   addIdea: (title: string) => invoke<Idea>("add_idea", { title }),
   deleteIdea: (id: string) => invoke<void>("delete_idea", { id }),
   generatePlan: (request: PlanRequest) => invoke<PlanOutcome>("generate_plan", { request }),
+  /** Progress arrives as `plan-progress` events; `cancelPlan` stops it. */
+  generateOffers: (request: OfferRequest) => invoke<OfferOutcome>("generate_offers", { request }),
+  listOfferDrafts: () => invoke<OfferDraft[]>("list_offer_drafts"),
+  updateOfferDraft: (draft: OfferDraftEdit) => invoke<OfferDraft>("update_offer_draft", { draft }),
+  deleteOfferDraft: (id: string) => invoke<void>("delete_offer_draft", { id }),
+  /** Puts every draft not synced yet on the main site; resolves to how many went. */
+  syncOfferDrafts: () => invoke<number>("sync_offer_drafts"),
 };
 
 /** Tauri commands reject with a plain string; anything else is unexpected. */

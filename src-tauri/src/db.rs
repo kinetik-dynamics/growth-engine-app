@@ -1,5 +1,6 @@
 //! Local SQLite database (growth-engine.db in the app-data folder): the
-//! generated ideas and the tool permissions granted to each AI agent.
+//! generated ideas, the offers the AI agent drafted, and the tool
+//! permissions granted to each AI agent.
 
 use rusqlite::{params, Connection, Row};
 use serde::{Deserialize, Serialize};
@@ -191,6 +192,45 @@ pub struct Permission {
     pub tool: String,
 }
 
+/// An offer the AI agent drafted, kept here until it is synced to the main site.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OfferDraft {
+    pub id: String,
+    pub name: String,
+    pub promise: String,
+    pub description: String,
+    pub price_range: String,
+    pub timeline: String,
+    pub deliverables: Vec<String>,
+    /// Ids of the main site's ICPs this offer is for.
+    pub icp_ids: Vec<i64>,
+    /// Ids of the main site's case studies that prove it.
+    pub case_study_ids: Vec<i64>,
+    /// Why the agent picked this offer.
+    pub rationale: String,
+    pub provider: Option<String>,
+    pub created_at: u64,
+    pub updated_at: u64,
+    pub synced_at: Option<u64>,
+    pub remote_id: Option<i64>,
+}
+
+/// The fields of an offer draft the Offers page can change.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OfferDraftEdit {
+    pub id: String,
+    pub name: String,
+    pub promise: String,
+    pub description: String,
+    pub price_range: String,
+    pub timeline: String,
+    pub deliverables: Vec<String>,
+    pub icp_ids: Vec<i64>,
+    pub case_study_ids: Vec<i64>,
+}
+
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS ideas (
     id              TEXT PRIMARY KEY,
@@ -234,6 +274,23 @@ CREATE TABLE IF NOT EXISTS channel_skills (
 CREATE TABLE IF NOT EXISTS settings (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS offer_drafts (
+    id             TEXT PRIMARY KEY,
+    name           TEXT NOT NULL,
+    promise        TEXT NOT NULL,
+    description    TEXT NOT NULL DEFAULT '',
+    price_range    TEXT NOT NULL DEFAULT '',
+    timeline       TEXT NOT NULL DEFAULT '',
+    deliverables   TEXT NOT NULL DEFAULT '[]',
+    icp_ids        TEXT NOT NULL DEFAULT '[]',
+    case_study_ids TEXT NOT NULL DEFAULT '[]',
+    rationale      TEXT NOT NULL DEFAULT '',
+    provider       TEXT,
+    created_at     INTEGER NOT NULL,
+    updated_at     INTEGER NOT NULL,
+    synced_at      INTEGER,
+    remote_id      INTEGER
 );
 ";
 
@@ -725,6 +782,144 @@ pub fn set_setting(conn: &Connection, key: &str, value: Option<&str>) -> Result<
     .map_err(describe)
 }
 
+/* Offers drafted by the AI agent */
+
+const OFFER_COLUMNS: &str = "id, name, promise, description, price_range, timeline, deliverables, icp_ids, \
+    case_study_ids, rationale, provider, created_at, updated_at, synced_at, remote_id";
+
+fn json_list<T: serde::de::DeserializeOwned>(raw: String) -> Vec<T> {
+    serde_json::from_str(&raw).unwrap_or_default()
+}
+
+fn to_json<T: Serialize>(value: &T) -> String {
+    serde_json::to_string(value).unwrap_or_else(|_| "[]".into())
+}
+
+fn offer_draft_from_row(row: &Row) -> rusqlite::Result<OfferDraft> {
+    Ok(OfferDraft {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        promise: row.get(2)?,
+        description: row.get(3)?,
+        price_range: row.get(4)?,
+        timeline: row.get(5)?,
+        deliverables: json_list(row.get(6)?),
+        icp_ids: json_list(row.get(7)?),
+        case_study_ids: json_list(row.get(8)?),
+        rationale: row.get(9)?,
+        provider: row.get(10)?,
+        created_at: row.get::<_, i64>(11)? as u64,
+        updated_at: row.get::<_, i64>(12)? as u64,
+        synced_at: row.get::<_, Option<i64>>(13)?.map(|synced_at| synced_at as u64),
+        remote_id: row.get(14)?,
+    })
+}
+
+pub fn insert_offer_drafts(conn: &mut Connection, drafts: &[OfferDraft]) -> Result<(), String> {
+    let tx = conn.transaction().map_err(describe)?;
+    for draft in drafts {
+        tx.execute(
+            &format!(
+                "INSERT INTO offer_drafts ({OFFER_COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)"
+            ),
+            params![
+                draft.id,
+                draft.name,
+                draft.promise,
+                draft.description,
+                draft.price_range,
+                draft.timeline,
+                to_json(&draft.deliverables),
+                to_json(&draft.icp_ids),
+                to_json(&draft.case_study_ids),
+                draft.rationale,
+                draft.provider,
+                draft.created_at as i64,
+                draft.updated_at as i64,
+                draft.synced_at.map(|synced_at| synced_at as i64),
+                draft.remote_id,
+            ],
+        )
+        .map_err(describe)?;
+    }
+    tx.commit().map_err(describe)
+}
+
+/// The drafts not on the main site yet, newest batch first, each batch in
+/// the order the agent wrote it.
+pub fn pending_offer_drafts(conn: &Connection) -> Result<Vec<OfferDraft>, String> {
+    let mut statement = conn
+        .prepare(&format!(
+            "SELECT {OFFER_COLUMNS} FROM offer_drafts WHERE synced_at IS NULL ORDER BY created_at DESC, rowid ASC"
+        ))
+        .map_err(describe)?;
+    let drafts = statement
+        .query_map([], offer_draft_from_row)
+        .map_err(describe)?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(describe)?;
+    Ok(drafts)
+}
+
+/// Names of the latest drafted offers, synced or not, so a new run does not repeat them.
+pub fn offer_draft_names(conn: &Connection) -> Result<Vec<String>, String> {
+    let mut statement = conn
+        .prepare("SELECT name FROM offer_drafts ORDER BY created_at DESC LIMIT 100")
+        .map_err(describe)?;
+    let names = statement
+        .query_map([], |row| row.get(0))
+        .map_err(describe)?
+        .collect::<rusqlite::Result<Vec<String>>>()
+        .map_err(describe)?;
+    Ok(names)
+}
+
+pub fn get_offer_draft(conn: &Connection, id: &str) -> Result<OfferDraft, String> {
+    conn.query_row(&format!("SELECT {OFFER_COLUMNS} FROM offer_drafts WHERE id = ?1"), [id], offer_draft_from_row)
+        .map_err(|error| match error {
+            rusqlite::Error::QueryReturnedNoRows => "This offer draft no longer exists.".to_string(),
+            other => describe(other),
+        })
+}
+
+pub fn update_offer_draft(conn: &Connection, edit: &OfferDraftEdit, now: u64) -> Result<OfferDraft, String> {
+    let changed = conn
+        .execute(
+            "UPDATE offer_drafts SET name = ?2, promise = ?3, description = ?4, price_range = ?5, timeline = ?6, \
+             deliverables = ?7, icp_ids = ?8, case_study_ids = ?9, updated_at = ?10 WHERE id = ?1",
+            params![
+                edit.id,
+                edit.name,
+                edit.promise,
+                edit.description,
+                edit.price_range,
+                edit.timeline,
+                to_json(&edit.deliverables),
+                to_json(&edit.icp_ids),
+                to_json(&edit.case_study_ids),
+                now as i64,
+            ],
+        )
+        .map_err(describe)?;
+    if changed == 0 {
+        return Err("This offer draft no longer exists.".into());
+    }
+    get_offer_draft(conn, &edit.id)
+}
+
+pub fn delete_offer_draft(conn: &Connection, id: &str) -> Result<(), String> {
+    conn.execute("DELETE FROM offer_drafts WHERE id = ?1", [id]).map(|_| ()).map_err(describe)
+}
+
+pub fn mark_offer_synced(conn: &Connection, id: &str, remote_id: Option<i64>, synced_at: u64) -> Result<(), String> {
+    conn.execute(
+        "UPDATE offer_drafts SET synced_at = ?2, remote_id = ?3 WHERE id = ?1",
+        params![id, synced_at as i64, remote_id],
+    )
+    .map(|_| ())
+    .map_err(describe)
+}
+
 /// One-time move of ideas from the pre-SQLite ideas.json into the database.
 /// The file is renamed afterwards so it is only imported once.
 pub fn import_legacy_json(conn: &mut Connection, json_path: &Path) -> Result<usize, String> {
@@ -1077,5 +1272,59 @@ mod tests {
         assert_eq!((first, second), (1, 0));
         assert_eq!(ideas[0].title, "Old idea");
         assert_eq!(ideas[0].offer_name.as_deref(), Some("Sprint"));
+    }
+
+    fn offer_draft(id: &str, created_at: u64) -> OfferDraft {
+        OfferDraft {
+            id: id.into(),
+            name: format!("Offer {id}"),
+            promise: "Faster estimates".into(),
+            description: String::new(),
+            price_range: String::new(),
+            timeline: String::new(),
+            deliverables: vec!["Workflow".into()],
+            icp_ids: vec![3],
+            case_study_ids: Vec::new(),
+            rationale: String::new(),
+            provider: Some("claude".into()),
+            created_at,
+            updated_at: created_at,
+            synced_at: None,
+            remote_id: None,
+        }
+    }
+
+    #[test]
+    fn offer_drafts_are_listed_until_synced_and_can_be_edited() {
+        let mut conn = memory_db();
+        insert_offer_drafts(&mut conn, &[offer_draft("a", 1), offer_draft("b", 2), offer_draft("c", 2)]).unwrap();
+
+        let ids = |conn: &Connection| -> Vec<String> { pending_offer_drafts(conn).unwrap().into_iter().map(|draft| draft.id).collect() };
+        assert_eq!(ids(&conn), ["b", "c", "a"]);
+        assert_eq!(pending_offer_drafts(&conn).unwrap()[0].icp_ids, [3]);
+
+        let edit = OfferDraftEdit {
+            id: "a".into(),
+            name: "Same-day estimates".into(),
+            promise: "Quotes out today".into(),
+            description: "How".into(),
+            price_range: "$5k".into(),
+            timeline: "2 weeks".into(),
+            deliverables: vec!["One".into(), "Two".into()],
+            icp_ids: Vec::new(),
+            case_study_ids: vec![9],
+        };
+        let edited = update_offer_draft(&conn, &edit, 50).unwrap();
+        assert_eq!(edited.name, "Same-day estimates");
+        assert_eq!(edited.updated_at, 50);
+        assert_eq!(edited.case_study_ids, [9]);
+
+        mark_offer_synced(&conn, "b", Some(77), 99).unwrap();
+        delete_offer_draft(&conn, "c").unwrap();
+
+        assert_eq!(ids(&conn), ["a"]);
+        assert_eq!(get_offer_draft(&conn, "b").unwrap().remote_id, Some(77));
+        assert_eq!(offer_draft_names(&conn).unwrap().len(), 2);
+        assert!(get_offer_draft(&conn, "c").unwrap_err().contains("no longer exists"));
     }
 }
