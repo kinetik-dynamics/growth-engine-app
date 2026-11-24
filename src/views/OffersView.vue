@@ -5,19 +5,24 @@ import {
   api,
   errorMessage,
   ideaCountFor,
+  type OfferDraft,
   type OfferIdeaCount,
   type OfferPage,
   type OfferPricing,
   type OfferSort,
   type OfferSource,
   type Session,
+  type SiteProof,
 } from "../api";
 import Icon from "../components/Icon.vue";
+import OfferDraftModal from "../components/OfferDraftModal.vue";
 import Pagination from "../components/Pagination.vue";
 import RefreshControls from "../components/RefreshControls.vue";
 import { createAutoRefresh } from "../autoRefresh";
+import GenerateOffersView from "./GenerateOffersView.vue";
 
 const props = defineProps<{ session: Session }>();
+const emit = defineEmits<{ openSettings: [] }>();
 
 const PRICING_OPTIONS: { value: OfferPricing; label: string }[] = [
   { value: "all", label: "Any pricing" },
@@ -107,8 +112,77 @@ function openSite(path: string) {
   openUrl(`${props.session.baseUrl}${path}`);
 }
 
+/* Offers drafted by the AI agent, kept in the app until they are synced */
+
+const drafts = ref<OfferDraft[]>([]);
+/** The site's case studies, to name the ones a draft links and to pick them when editing. */
+const proof = ref<SiteProof[]>([]);
+const generatingOffers = ref(false);
+const editingDraft = ref<OfferDraft | null>(null);
+const confirmDeleteDraftId = ref<string | null>(null);
+const syncing = ref(false);
+const notice = ref("");
+const draftError = ref("");
+
+// A refresh scrolls the page to the top, so it waits while the generate page is open.
+watch(generatingOffers, (open) => (open ? autoRefresh.stop() : autoRefresh.start()));
+
+const icpNames = computed(() => new Map((result.value?.icp_options ?? []).map((icp) => [icp.id, icp.name])));
+
+async function loadDrafts() {
+  try {
+    drafts.value = await api.listOfferDrafts();
+    // Only needed to show and edit drafts; a failure here must not hide them.
+    if (drafts.value.length) proof.value = (await api.sitePage("proof").catch(() => ({ proof: proof.value }))).proof;
+  } catch (caught) {
+    draftError.value = errorMessage(caught);
+  }
+}
+
+async function onGenerated(created: OfferDraft[], requested: number) {
+  generatingOffers.value = false;
+  await Promise.all([loadDrafts(), load()]);
+  notice.value =
+    created.length === requested
+      ? `Drafted ${created.length} new ${created.length === 1 ? "offer" : "offers"}. Review them, then sync them to the website.`
+      : `The AI returned ${created.length} of the ${requested} offers you asked for. Generate again for more.`;
+}
+
+function onDraftSaved(saved: OfferDraft) {
+  drafts.value = drafts.value.map((draft) => (draft.id === saved.id ? saved : draft));
+  editingDraft.value = null;
+}
+
+async function deleteDraft(draft: OfferDraft) {
+  draftError.value = "";
+  try {
+    await api.deleteOfferDraft(draft.id);
+    drafts.value = drafts.value.filter((item) => item.id !== draft.id);
+  } catch (caught) {
+    draftError.value = errorMessage(caught);
+  } finally {
+    confirmDeleteDraftId.value = null;
+  }
+}
+
+async function syncDrafts() {
+  draftError.value = "";
+  notice.value = "";
+  syncing.value = true;
+  try {
+    const synced = await api.syncOfferDrafts();
+    notice.value = `Synced ${synced} ${synced === 1 ? "offer" : "offers"} to the website.`;
+    await Promise.all([loadDrafts(), load(1)]);
+  } catch (caught) {
+    draftError.value = errorMessage(caught);
+  } finally {
+    syncing.value = false;
+  }
+}
+
 onMounted(() => {
   load(1);
+  loadDrafts();
   autoRefresh.start();
 });
 onUnmounted(() => {
@@ -118,11 +192,107 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div class="bp">
+  <GenerateOffersView
+    v-if="generatingOffers"
+    :session="session"
+    @close="generatingOffers = false"
+    @generated="onGenerated"
+    @open-settings="generatingOffers = false; emit('openSettings')"
+  />
+
+  <OfferDraftModal
+    v-if="editingDraft"
+    :draft="editingDraft"
+    :icp-options="result?.icp_options ?? []"
+    :proof-options="proof"
+    @close="editingDraft = null"
+    @saved="onDraftSaved"
+  />
+
+  <div v-show="!generatingOffers" class="bp">
     <div class="bp-header">
       <h1 class="bp-h1">Offers</h1>
-      <RefreshControls v-model="autoRefreshOn" :countdown="countdown" :refreshing="busy" size="sm" @refresh="load()" />
+      <div class="od-header-actions">
+        <RefreshControls v-model="autoRefreshOn" :countdown="countdown" :refreshing="busy" size="sm" @refresh="load()" />
+        <button class="iv-plan" @click="generatingOffers = true"><Icon name="sparkles" :size="14" /> Generate offers</button>
+      </div>
     </div>
+
+    <div v-if="notice" class="alert alert-success row-between" role="status">
+      {{ notice }}
+      <button class="btn btn-sm btn-ghost" @click="notice = ''">Dismiss</button>
+    </div>
+
+    <!-- Offers the AI agent drafted that are not on the website yet -->
+    <section v-if="drafts.length || draftError" class="od" aria-label="New offers from your AI agent">
+      <div class="od-head">
+        <div style="min-width: 0">
+          <h2 class="od-title"><Icon name="sparkles" :size="14" /> New offers from your AI agent</h2>
+          <p class="od-sub">
+            {{ drafts.length }} {{ drafts.length === 1 ? "offer is" : "offers are" }} only in this app. Edit or delete any you don't want, then sync the rest to the website.
+          </p>
+        </div>
+        <button v-if="drafts.length" class="iv-plan" :disabled="syncing" @click="syncDrafts">
+          <span v-if="syncing" class="spinner" style="width: 13px; height: 13px; border-width: 1.5px"></span>
+          <Icon v-else name="upload" :size="14" />
+          {{ syncing ? "Syncing…" : `Sync ${drafts.length} to website` }}
+        </button>
+      </div>
+
+      <div v-if="draftError" class="alert alert-error" role="alert">{{ draftError }}</div>
+
+      <ul v-if="drafts.length" class="bp-grid">
+        <li v-for="draft in drafts" :key="draft.id" class="bp-card od-card">
+          <div class="bp-card-body">
+            <div class="bp-card-top">
+              <div style="min-width: 0">
+                <button class="bp-name" @click="editingDraft = draft">{{ draft.name }}</button>
+                <div class="bp-meta">
+                  <span class="bp-price">{{ draft.priceRange || "No price stated" }}</span>
+                  <span v-if="draft.timeline" class="bp-inline"><Icon name="clock" :size="12" :stroke="1.5" /> {{ draft.timeline }}</span>
+                </div>
+              </div>
+              <span class="bp-source od-pending" title="Drafted in this app and not synced to the website yet">
+                <Icon name="bot" :size="12" :stroke="1.5" /> Not synced
+              </span>
+            </div>
+
+            <p class="bp-promise">{{ draft.promise }}</p>
+
+            <ul v-if="draft.deliverables.length" class="bp-deliverables">
+              <li v-for="item in draft.deliverables.slice(0, 3)" :key="item"><span class="bp-bullet"></span>{{ item }}</li>
+              <li v-if="draft.deliverables.length > 3" class="bp-more">+{{ draft.deliverables.length - 3 }} more</li>
+            </ul>
+
+            <div v-if="draft.icpIds.some((id) => icpNames.has(id))" class="bp-chips">
+              <span class="bp-chip-icon"><Icon name="target" :size="12" :stroke="1.5" /></span>
+              <template v-for="id in draft.icpIds" :key="id">
+                <span v-if="icpNames.has(id)" class="bp-chip">{{ icpNames.get(id) }}</span>
+              </template>
+            </div>
+
+            <p v-if="draft.rationale" class="od-why"><b>Why:</b> {{ draft.rationale }}</p>
+          </div>
+
+          <div class="bp-card-foot">
+            <div class="bp-foot-stats">
+              <span class="bp-inline" title="Case studies that will be attached to this offer">
+                <Icon name="fileCheck" :size="12" :stroke="1.5" /> {{ draft.caseStudyIds.length }} proof
+              </span>
+            </div>
+            <div v-if="confirmDeleteDraftId === draft.id" class="od-actions">
+              <span>Delete this offer?</span>
+              <button class="bp-open" @click="confirmDeleteDraftId = null">Keep</button>
+              <button class="bp-open od-danger" @click="deleteDraft(draft)">Delete</button>
+            </div>
+            <div v-else class="od-actions">
+              <button class="bp-open" :disabled="syncing" @click="editingDraft = draft"><Icon name="pencil" :size="12" /> Edit</button>
+              <button class="bp-open od-danger" :disabled="syncing" @click="confirmDeleteDraftId = draft.id"><Icon name="trash" :size="12" /> Delete</button>
+            </div>
+          </div>
+        </li>
+      </ul>
+    </section>
 
     <div v-if="error" class="alert alert-error" role="alert">
       {{ error }}
@@ -139,8 +309,11 @@ onUnmounted(() => {
     <div v-else-if="result && result.stats.total === 0" class="bp-empty">
       <span class="bp-empty-icon"><Icon name="package" :stroke="1.5" /></span>
       <p class="bp-empty-title">No offers yet</p>
-      <p class="bp-empty-detail">Add your first package in the web app, or sync from your website and the research agent will draft them.</p>
-      <button class="bp-btn" style="margin-top: 16px" @click="openSite('/brain/offers')">Open the web app</button>
+      <p class="bp-empty-detail">Let your AI agent draft offers from your company overview, ICPs and case studies, or add one in the web app.</p>
+      <div class="od-empty-actions">
+        <button class="iv-plan" @click="generatingOffers = true"><Icon name="sparkles" :size="14" /> Generate offers</button>
+        <button class="bp-btn" @click="openSite('/brain/offers')">Open the web app</button>
+      </div>
     </div>
 
     <template v-else-if="result">

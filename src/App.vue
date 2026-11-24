@@ -122,7 +122,7 @@ async function signOut() {
 
     <main class="main">
       <OverviewView v-if="page === 'overview'" :session="session" @navigate="page = $event" />
-      <OffersView v-else-if="page === 'offers'" :session="session" />
+      <OffersView v-else-if="page === 'offers'" :session="session" @open-settings="page = 'settings'" />
       <IcpsView v-else-if="page === 'icps'" :session="session" />
       <ProofView v-else-if="page === 'proof'" />
       <IdeasView v-else-if="page === 'ideas'" :session="session" @open-settings="page = 'settings'" />

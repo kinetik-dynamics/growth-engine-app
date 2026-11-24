@@ -1,5 +1,6 @@
 //! Builds the weekly-plan prompt and parses the ideas the AI sends back.
 
+use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -163,18 +164,25 @@ pub fn build_prompt(
 /// Pulls the JSON array of ideas out of the CLI output, tolerating code
 /// fences or chatter around it.
 pub fn parse_ideas(output: &str) -> Result<Vec<Drafted>, String> {
+    parse_array(output, |idea: &Drafted| !idea.title.trim().is_empty(), "ideas")
+}
+
+/// The first JSON array in `output` that holds at least one item `keep`
+/// accepts, with the rejected items dropped. `noun` names the items in the
+/// error shown when there is none.
+pub fn parse_array<T: DeserializeOwned>(output: &str, keep: impl Fn(&T) -> bool, noun: &str) -> Result<Vec<T>, String> {
     for (index, _) in output.match_indices('[') {
-        let mut stream = serde_json::Deserializer::from_str(&output[index..]).into_iter::<Vec<Drafted>>();
-        if let Some(Ok(ideas)) = stream.next() {
-            let ideas: Vec<Drafted> = ideas.into_iter().filter(|idea| !idea.title.trim().is_empty()).collect();
-            if !ideas.is_empty() {
-                return Ok(ideas);
+        let mut stream = serde_json::Deserializer::from_str(&output[index..]).into_iter::<Vec<T>>();
+        if let Some(Ok(items)) = stream.next() {
+            let items: Vec<T> = items.into_iter().filter(|item| keep(item)).collect();
+            if !items.is_empty() {
+                return Ok(items);
             }
         }
     }
 
     let preview: String = output.trim().chars().take(400).collect();
-    Err(format!("The AI didn't return ideas in the expected format. It said:\n{preview}"))
+    Err(format!("The AI didn't return {noun} in the expected format. It said:\n{preview}"))
 }
 
 #[cfg(test)]
