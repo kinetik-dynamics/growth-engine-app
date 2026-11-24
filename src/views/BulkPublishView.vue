@@ -3,7 +3,9 @@ import { computed, onMounted, reactive, ref } from "vue";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { api, errorMessage, type ComposerChannel, type Idea, type Session } from "../api";
 import { CONNECTIONS_PATH, DEFAULT_POST_TIME, addDays, localDateFromToday } from "../publish";
+import { plannedChannel } from "../channels";
 import Icon from "../components/Icon.vue";
+import ChannelAvatar from "../components/ChannelAvatar.vue";
 import SectionCard from "../components/SectionCard.vue";
 import ChannelPicker from "../components/ChannelPicker.vue";
 import FormatToolbar from "../components/FormatToolbar.vue";
@@ -20,7 +22,8 @@ interface Schedule {
 const items = ref(props.ideas.map((idea) => ({ idea, text: idea.suggestedDraft || [idea.title, idea.shortNotes].filter(Boolean).join("\n\n") })));
 const edited = ref<string[]>([]);
 const channels = ref<ComposerChannel[]>([]);
-const selectedIds = ref<string[]>([]);
+/** Idea id → the channels that idea goes out on. Each row picks its own. */
+const rowChannels = reactive<Record<string, string[]>>({});
 const loading = ref(true);
 const busy = ref<"" | "saving" | "sending">("");
 const errors = ref<string[]>([]);
@@ -42,15 +45,42 @@ const editingText = ref("");
 const editTextarea = ref<HTMLTextAreaElement | null>(null);
 const editingItem = computed(() => items.value.find((item) => item.idea.id === editingId.value) ?? null);
 
-const postCount = computed(() => items.value.length * selectedIds.value.length);
-const canSubmit = computed(() => selectedIds.value.length > 0 && items.value.length > 0 && busy.value === "" && !loading.value);
+function channelsOf(id: string): string[] {
+  return rowChannels[id] ?? [];
+}
+
+/** Channels picked on at least one row. */
+const usedIds = computed(() => channels.value.filter((c) => items.value.some((item) => channelsOf(item.idea.id).includes(c.id))).map((c) => c.id));
+/** Channels picked on every row: these show as selected in the "Publish to" card. */
+const everyRowIds = computed(() =>
+  items.value.length ? channels.value.filter((c) => items.value.every((item) => channelsOf(item.idea.id).includes(c.id))).map((c) => c.id) : [],
+);
+const postCount = computed(() => items.value.reduce((sum, item) => sum + channelsOf(item.idea.id).length, 0));
+const missingChannel = computed(() => items.value.some((item) => !channelsOf(item.idea.id).length));
+const canSubmit = computed(() => postCount.value > 0 && items.value.length > 0 && busy.value === "" && !loading.value);
+
+/** The connected channel that best matches the one the idea was written for. */
+function plannedTarget(idea: Idea): ComposerChannel | undefined {
+  const planned = plannedChannel(idea);
+  return (
+    channels.value.find((c) => c.id === idea.channelId) ??
+    channels.value.find((c) => !!idea.channelName && c.name === idea.channelName) ??
+    channels.value.find((c) => !!planned && c.platform === planned.platform)
+  );
+}
+
+/** Channels already picked for the idea, else the one it was planned for, else the first connected one. */
+function defaultChannels(idea: Idea): string[] {
+  const known = idea.publishChannels.map((c) => c.id).filter((id) => channels.value.some((c) => c.id === id));
+  if (known.length) return known;
+  const target = plannedTarget(idea) ?? channels.value[0];
+  return target ? [target.id] : [];
+}
 
 onMounted(async () => {
   try {
     channels.value = (await api.listChannels()).channels;
-    // Start with the channels the ideas were written for; fall back to the first connected one.
-    const targeted = channels.value.filter((c) => props.ideas.some((idea) => idea.channelId === c.id)).map((c) => c.id);
-    selectedIds.value = targeted.length ? targeted : channels.value.slice(0, 1).map((c) => c.id);
+    for (const { idea } of items.value) rowChannels[idea.id] = defaultChannels(idea);
   } catch (caught) {
     errors.value = [errorMessage(caught)];
   } finally {
@@ -58,8 +88,19 @@ onMounted(async () => {
   }
 });
 
-function toggleChannel(id: string) {
-  selectedIds.value = selectedIds.value.includes(id) ? selectedIds.value.filter((c) => c !== id) : [...selectedIds.value, id];
+/** One row's channel chip. */
+function toggleRowChannel(ideaId: string, channelId: string) {
+  const current = channelsOf(ideaId);
+  rowChannels[ideaId] = current.includes(channelId) ? current.filter((c) => c !== channelId) : [...current, channelId];
+}
+
+/** The "Publish to" card: adds the channel to every row, or takes it off every row when all rows have it. */
+function toggleChannel(channelId: string) {
+  const onAll = everyRowIds.value.includes(channelId);
+  for (const { idea } of items.value) {
+    const current = channelsOf(idea.id).filter((c) => c !== channelId);
+    rowChannels[idea.id] = onAll ? current : [...current, channelId];
+  }
 }
 
 function removeItem(id: string) {
@@ -83,7 +124,8 @@ function saveEditedText() {
 async function saveAll() {
   for (const { idea, text } of items.value) {
     const schedule = schedules[idea.id];
-    const first = channels.value.find((c) => c.id === selectedIds.value[0]);
+    const picked = channelsOf(idea.id);
+    const first = channels.value.find((c) => c.id === picked[0]);
     const saved = await api.updateIdea({
       id: idea.id,
       title: idea.title,
@@ -96,7 +138,7 @@ async function saveAll() {
       channelName: first?.name ?? idea.channelName,
       suggestedDraft: text,
       imagePrompt: idea.imagePrompt,
-      publishChannels: selectedIds.value.map((id) => ({ id, scheduledDate: schedule.date || null, scheduledTime: schedule.time || null })),
+      publishChannels: picked.map((id) => ({ id, scheduledDate: schedule.date || null, scheduledTime: schedule.time || null })),
     });
     emit("saved", saved);
   }
@@ -108,13 +150,21 @@ async function submit(action: "saving" | "sending") {
     errors.value = ["Set a date and time for every idea before sending."];
     return;
   }
+  if (action === "sending" && missingChannel.value) {
+    errors.value = ["Pick at least one channel for every idea before sending, or leave that idea out."];
+    return;
+  }
   busy.value = action;
   try {
     await saveAll();
     if (action === "sending") {
       const published = await api.publishIdeas(
-        items.value.map((item) => ({ id: item.idea.id, scheduledDate: schedules[item.idea.id].date, scheduledTime: schedules[item.idea.id].time })),
-        selectedIds.value,
+        items.value.map((item) => ({
+          id: item.idea.id,
+          scheduledDate: schedules[item.idea.id].date,
+          scheduledTime: schedules[item.idea.id].time,
+          channels: channelsOf(item.idea.id),
+        })),
       );
       published.forEach((idea) => emit("saved", idea));
       emit("close", true);
@@ -145,7 +195,7 @@ function openConnections() {
           <p class="wp-subtitle">
             {{
               postCount > 0
-                ? `${postCount} ${postCount === 1 ? "post" : "posts"} across ${selectedIds.length} ${selectedIds.length === 1 ? "channel" : "channels"}`
+                ? `${postCount} ${postCount === 1 ? "post" : "posts"} across ${usedIds.length} ${usedIds.length === 1 ? "channel" : "channels"}`
                 : "Pick a channel to publish to"
             }}
           </p>
@@ -173,9 +223,9 @@ function openConnections() {
             </ul>
           </div>
 
-          <SectionCard icon="share" title="Publish to" hint="Every idea below goes out on each channel you pick.">
+          <SectionCard icon="share" title="Publish to" hint="Pick a channel to add it to every idea, or pick it again to take it off. Fine-tune each idea's channels below.">
             <div v-if="loading" class="skeleton" style="height: 64px"></div>
-            <ChannelPicker v-else :channels="channels" :selected-ids="selectedIds" @toggle="toggleChannel" @connect="openConnections" />
+            <ChannelPicker v-else :channels="channels" :selected-ids="everyRowIds" @toggle="toggleChannel" @connect="openConnections" />
           </SectionCard>
 
           <SectionCard icon="calendarClock" title="Schedule" hint="Spread the ideas out, then fine-tune any single one below.">
@@ -221,6 +271,24 @@ function openConnections() {
                     <span v-if="item.idea.pattern">{{ item.idea.pattern }}</span>
                     <button class="wp-link" @click="openEditor(item.idea.id, item.text)">Edit text</button>
                     <span v-if="edited.includes(item.idea.id)" class="bk-edited">Edited</span>
+                  </div>
+                  <div v-if="channels.length" class="bk-channels" role="group" :aria-label="`Channels for ${item.idea.title}`">
+                    <button
+                      v-for="channel in channels"
+                      :key="channel.id"
+                      type="button"
+                      class="bk-chip"
+                      :class="{ selected: channelsOf(item.idea.id).includes(channel.id) }"
+                      :aria-pressed="channelsOf(item.idea.id).includes(channel.id)"
+                      :title="channel.handleOrSub ? `${channel.name} · ${channel.handleOrSub}` : channel.name"
+                      @click="toggleRowChannel(item.idea.id, channel.id)"
+                    >
+                      <ChannelAvatar :channel="channel" size="sm" />
+                      <span class="bk-chip-name">{{ channel.name }}</span>
+                      <span v-if="plannedTarget(item.idea)?.id === channel.id" class="cp-planned">Planned</span>
+                      <Icon v-if="channelsOf(item.idea.id).includes(channel.id)" name="check" :size="11" :stroke="3" />
+                    </button>
+                    <span v-if="!channelsOf(item.idea.id).length" class="bk-no-channel">Pick a channel</span>
                   </div>
                 </div>
                 <div class="bk-when">
