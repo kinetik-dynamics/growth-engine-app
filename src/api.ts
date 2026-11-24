@@ -161,6 +161,8 @@ export interface BulkIdeaSchedule {
   id: string;
   scheduledDate: string;
   scheduledTime: string;
+  /** The channels this idea goes out on. */
+  channels: string[];
 }
 
 export interface PlanSlot {
@@ -339,7 +341,7 @@ export const api = {
   updateIdea: (idea: IdeaEdit) => invoke<Idea>("update_idea", { idea }),
   sendIdea: (id: string) => invoke<Idea>("send_idea", { id }),
   publishIdea: (id: string) => invoke<Idea>("publish_idea", { id }),
-  publishIdeas: (ideas: BulkIdeaSchedule[], channels: string[]) => invoke<Idea[]>("publish_ideas", { ideas, channels }),
+  publishIdeas: (ideas: BulkIdeaSchedule[]) => invoke<Idea[]>("publish_ideas", { ideas }),
   listChannels: () => invoke<{ channels: ComposerChannel[] }>("list_channels"),
   getRemoteIdea: (remoteId: number) => invoke<RemoteComposer>("get_remote_idea", { remoteId }),
   listPatterns: () => invoke<string[]>("list_patterns"),

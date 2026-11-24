@@ -492,40 +492,52 @@ async fn publish_idea(app: AppHandle, id: String) -> Result<Idea, String> {
     db::mark_published(&store::database(&app)?, &id, now_ms())
 }
 
-/// One idea picked on the bulk publish page and when it goes out.
+/// One idea picked on the bulk publish page, when it goes out and on which channels.
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct BulkIdea {
     id: String,
     scheduled_date: String,
     scheduled_time: String,
+    channels: Vec<String>,
 }
 
 /// The main site's "Send all" on its bulk publish page: every idea is sent
-/// (or updated) first, then all their posts are queued together.
+/// (or updated) first, then their posts are queued. Each idea picks its own
+/// channels, so one bulk request goes out per distinct set of channels.
 #[tauri::command]
-async fn publish_ideas(app: AppHandle, ideas: Vec<BulkIdea>, channels: Vec<String>) -> Result<Vec<Idea>, String> {
+async fn publish_ideas(app: AppHandle, ideas: Vec<BulkIdea>) -> Result<Vec<Idea>, String> {
     if ideas.is_empty() {
         return Err("Pick at least one idea to publish.".into());
     }
-    if channels.is_empty() {
-        return Err("Pick at least one channel to publish to.".into());
+    if ideas.iter().any(|picked| picked.channels.is_empty()) {
+        return Err("Pick at least one channel for every idea.".into());
     }
     let config = signed_in(&app)?;
 
-    let mut entries = Vec::with_capacity(ideas.len());
+    // Sorted channel set → the ideas going out on exactly those channels.
+    let mut groups: Vec<(Vec<String>, Vec<serde_json::Value>)> = Vec::new();
     for picked in &ideas {
         let idea = upload_idea(&app, &config, &picked.id).await?;
-        entries.push(serde_json::json!({
+        let entry = serde_json::json!({
             "id": remote_id_of(&idea)?,
             "text": if idea.suggested_draft.trim().is_empty() { None } else { Some(&idea.suggested_draft) },
             "scheduled_date": picked.scheduled_date,
             "scheduled_time": picked.scheduled_time,
-        }));
+        });
+        let mut channels = picked.channels.clone();
+        channels.sort();
+        channels.dedup();
+        match groups.iter_mut().find(|(set, _)| *set == channels) {
+            Some((_, entries)) => entries.push(entry),
+            None => groups.push((channels, vec![entry])),
+        }
     }
 
-    let body = serde_json::json!({ "action": "send", "channels": channels, "ideas": entries });
-    api::post(&config.session.base_url, &config.token, "/api/ideas/posts/bulk", &body).await?;
+    for (channels, entries) in &groups {
+        let body = serde_json::json!({ "action": "send", "channels": channels, "ideas": entries });
+        api::post(&config.session.base_url, &config.token, "/api/ideas/posts/bulk", &body).await?;
+    }
 
     let conn = store::database(&app)?;
     let published_at = now_ms();
