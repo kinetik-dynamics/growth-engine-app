@@ -17,7 +17,9 @@ pub struct Slot {
 #[serde(rename_all = "camelCase")]
 pub struct PlanRequest {
     pub provider: String,
-    pub offer_id: i64,
+    /// The focus offers, in pick order. Slots are shared out across them
+    /// in turn; see [`slot_offers`].
+    pub offer_ids: Vec<i64>,
     pub slots: Vec<Slot>,
     pub with_images: bool,
     /// The topic every idea should be about. Blank lets the agent pick
@@ -70,13 +72,21 @@ pub struct Drafted {
     pub image_prompt: Option<String>,
 }
 
-/// `slot_skills[i]` is the index in `skills` of the skill slot `i` follows.
+/// For each of `slots` slots, the index of the offer it sells: the offers
+/// take turns, so every offer gets an even share of the week.
+pub fn slot_offers(slots: usize, offers: usize) -> Vec<usize> {
+    (0..slots).map(|slot| if offers == 0 { 0 } else { slot % offers }).collect()
+}
+
+/// `slot_skills[i]` is the index in `skills` of the skill slot `i` follows,
+/// and `slot_offers[i]` the index in `offers` of the offer it sells.
 #[allow(clippy::too_many_arguments)]
 pub fn build_prompt(
     skills: &[PlanSkill],
     slot_skills: &[usize],
     company: &Value,
-    offer: &Value,
+    offers: &[Value],
+    slot_offers: &[usize],
     slots: &[Slot],
     topic: Option<&Topic>,
     with_images: bool,
@@ -84,7 +94,7 @@ pub fn build_prompt(
 ) -> String {
     let mut prompt = String::from(
         "You are the editorial agent for a B2B studio. Plan next week's social content ideas \
-         for the offer below, one per post slot. Work only from the material in this message: do not use tools, \
+         for the focus offer(s) below, one per post slot. Work only from the material in this message: do not use tools, \
          read files, or ask questions.\n\n",
     );
 
@@ -105,8 +115,23 @@ pub fn build_prompt(
     prompt.push_str("\n\n# Company\n\n");
     prompt.push_str(&serde_json::to_string_pretty(company).unwrap_or_default());
 
-    prompt.push_str("\n\n# Focus offer (primary CTA and case angle)\n\n");
-    prompt.push_str(&serde_json::to_string_pretty(offer).unwrap_or_default());
+    let several_offers = offers.len() > 1;
+    if several_offers {
+        prompt.push_str(
+            "\n\n# Focus offers (primary CTA and case angle)\n\nEach slot below names the offer its idea must sell. \
+             Sell only that offer in that idea.",
+        );
+        for offer in offers {
+            prompt.push_str(&format!(
+                "\n\n## Offer: {}\n\n{}",
+                offer_name(offer),
+                serde_json::to_string_pretty(offer).unwrap_or_default()
+            ));
+        }
+    } else {
+        prompt.push_str("\n\n# Focus offer (primary CTA and case angle)\n\n");
+        prompt.push_str(&serde_json::to_string_pretty(offers.first().unwrap_or(&Value::Null)).unwrap_or_default());
+    }
 
     if let Some(topic) = topic {
         prompt.push_str("\n\n# Topic for this week (every idea must be about it)\n\n");
@@ -116,7 +141,11 @@ pub fn build_prompt(
         if !topic.description.is_empty() {
             prompt.push_str(&format!("Description: {}\n", topic.description));
         }
-        prompt.push_str("Tie each idea to this topic while still selling the focus offer.");
+        prompt.push_str(if several_offers {
+            "Tie each idea to this topic while still selling its slot's offer."
+        } else {
+            "Tie each idea to this topic while still selling the focus offer."
+        });
     }
 
     prompt.push_str("\n\n# Slots to fill\n\nWrite exactly one idea per slot, in this order:\n");
@@ -125,12 +154,15 @@ pub fn build_prompt(
         if several_skills && let Some(skill) = slot_skills.get(index).and_then(|&i| skills.get(i)) {
             prompt.push_str(&format!(" - skill: {}", skill.name.trim()));
         }
+        if several_offers && let Some(offer) = slot_offers.get(index).and_then(|&i| offers.get(i)) {
+            prompt.push_str(&format!(" - offer: {}", offer_name(offer)));
+        }
         prompt.push('\n');
     }
     prompt.push_str(
         "\nFit each idea to its platform: LinkedIn is long-form and opinionated, X is one sharp \
          point or a thread opener, Facebook is short and conversational, Website is an SEO \
-         article angle. Every idea must take a different angle on the offer.\n",
+         article angle. Every idea must take a different angle on its offer.\n",
     );
 
     if !existing_titles.is_empty() {
@@ -159,6 +191,10 @@ pub fn build_prompt(
     }
 
     prompt
+}
+
+fn offer_name(offer: &Value) -> &str {
+    offer["name"].as_str().map(str::trim).unwrap_or("Unnamed offer")
 }
 
 /// Pulls the JSON array of ideas out of the CLI output, tolerating code
@@ -222,8 +258,8 @@ mod tests {
         let offer = serde_json::json!({ "name": "AI Automation Sprint" });
 
         let skills = one_skill();
-        let text_only = build_prompt(&skills, &[0], &Value::Null, &offer, &slots, None, false, &[]);
-        let with_images = build_prompt(&skills, &[0], &Value::Null, &offer, &slots, None, true, &["Old idea".into()]);
+        let text_only = build_prompt(&skills, &[0], &Value::Null, std::slice::from_ref(&offer), &[0], &slots, None, false, &[]);
+        let with_images = build_prompt(&skills, &[0], &Value::Null, &[offer], &[0], &slots, None, true, &["Old idea".into()]);
 
         assert!(text_only.contains("# Writing skill (follow strictly)\n\nSKILL"));
         assert!(text_only.contains("1. X · account (X)\n"));
@@ -238,7 +274,7 @@ mod tests {
     fn prompt_includes_the_topic_when_given_and_blank_topics_are_ignored() {
         let request = |title: &str, description: &str| PlanRequest {
             provider: "claude".into(),
-            offer_id: 1,
+            offer_ids: vec![1],
             slots: Vec::new(),
             with_images: false,
             topic_title: Some(title.into()),
@@ -250,7 +286,7 @@ mod tests {
 
         let focused = request(" Black Friday prep ", "Scaling stores for traffic spikes");
         let prompt =
-            build_prompt(&one_skill(), &[], &Value::Null, &Value::Null, &[], focused.topic().as_ref(), false, &[]);
+            build_prompt(&one_skill(), &[], &Value::Null, &[], &[], &[], focused.topic().as_ref(), false, &[]);
 
         assert!(prompt.contains("Title: Black Friday prep\n"));
         assert!(prompt.contains("Description: Scaling stores for traffic spikes\n"));
@@ -269,12 +305,41 @@ mod tests {
             PlanSkill { name: "Punchy".into(), content: "SHORT RULES".into() },
         ];
 
-        let prompt = build_prompt(&skills, &[0, 1], &Value::Null, &Value::Null, &slots, None, false, &[]);
+        let prompt = build_prompt(&skills, &[0, 1], &Value::Null, &[], &[], &slots, None, false, &[]);
 
         assert!(prompt.contains("## Skill: Long form\n\nLONG RULES"));
         assert!(prompt.contains("## Skill: Punchy\n\nSHORT RULES"));
         assert!(prompt.contains("1. LinkedIn · Personal profile (LinkedIn) - skill: Long form\n"));
         assert!(prompt.contains("2. X · account (X) - skill: Punchy\n"));
+    }
+
+    #[test]
+    fn offers_take_turns_across_slots() {
+        assert_eq!(slot_offers(5, 2), vec![0, 1, 0, 1, 0]);
+        assert_eq!(slot_offers(3, 1), vec![0, 0, 0]);
+        assert_eq!(slot_offers(2, 3), vec![0, 1]);
+    }
+
+    #[test]
+    fn several_offers_are_each_included_and_named_on_their_slots() {
+        let slot = |id: &str, name: &str, platform: &str| Slot {
+            channel_id: id.into(),
+            channel_name: name.into(),
+            platform: platform.into(),
+        };
+        let slots = vec![slot("linkedin_personal", "LinkedIn · Personal profile", "LinkedIn"), slot("x_profile", "X · account", "X")];
+        let offers = vec![
+            serde_json::json!({ "name": "SaaS Development" }),
+            serde_json::json!({ "name": "Tech Augmentation" }),
+        ];
+
+        let prompt = build_prompt(&one_skill(), &[0, 0], &Value::Null, &offers, &[0, 1], &slots, None, false, &[]);
+
+        assert!(prompt.contains("# Focus offers"));
+        assert!(prompt.contains("## Offer: SaaS Development"));
+        assert!(prompt.contains("## Offer: Tech Augmentation"));
+        assert!(prompt.contains("1. LinkedIn · Personal profile (LinkedIn) - offer: SaaS Development\n"));
+        assert!(prompt.contains("2. X · account (X) - offer: Tech Augmentation\n"));
     }
 
     fn one_skill() -> Vec<PlanSkill> {

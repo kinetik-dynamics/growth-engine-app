@@ -48,9 +48,17 @@ const counts = reactive<Record<string, number>>(Object.fromEntries(channels.map(
 const topicTitle = ref("");
 const topicDescription = ref("");
 const offerSearch = ref("");
-/** Kept as a whole offer so the pick survives searching and paging. */
-const offer = ref<Offer | null>(null);
-const offerId = computed(() => offer.value?.id ?? null);
+/** Kept as whole offers, in pick order, so the picks survive searching and paging. */
+const pickedOffers = ref<Offer[]>([]);
+const offerIds = computed(() => pickedOffers.value.map((item) => item.id));
+function isPicked(item: Offer) {
+  return pickedOffers.value.some((picked) => picked.id === item.id);
+}
+function toggleOffer(item: Offer) {
+  pickedOffers.value = isPicked(item)
+    ? pickedOffers.value.filter((picked) => picked.id !== item.id)
+    : [...pickedOffers.value, item];
+}
 const mode = ref<"ai" | "swipe">("ai");
 const provider = ref("");
 const withImages = ref(false);
@@ -90,14 +98,14 @@ const elapsedLabel = computed(() => {
 const hasTopic = computed(() => topicTitle.value.trim() !== "" || topicDescription.value.trim() !== "");
 
 const canContinue = computed(() => {
-  if (step.value === 1) return total.value > 0 && offerId.value !== null;
+  if (step.value === 1) return total.value > 0 && offerIds.value.length > 0;
   if (step.value === 2) return mode.value === "ai" && provider.value !== "";
   return !(withImages.value && imageMode.value === "generate" && !imageApi.value?.configured);
 });
 /** Why Next is disabled, so the footer can say it instead of leaving the user guessing. */
 const blocker = computed(() => {
   if (loading.value || canContinue.value) return "";
-  if (step.value === 1) return total.value === 0 ? "Add at least one post to a channel." : "Pick a focus offer.";
+  if (step.value === 1) return total.value === 0 ? "Add at least one post to a channel." : "Pick at least one focus offer.";
   if (step.value === 2) return "Pick an AI agent to write the ideas.";
   if (step.value === 3) return "Add an image API key in Settings, or pick image prompts only.";
   return "";
@@ -118,7 +126,7 @@ onMounted(async () => {
     for (const row of channelSkills) channelSkillIds[row.channelId] = row.skillId;
     if (imageApi.value.configured) imageMode.value = "generate";
     hasOffers.value = offers.value.length > 0;
-    offer.value = offers.value[0] ?? null;
+    pickedOffers.value = offers.value.slice(0, 1);
     provider.value = installed.value[0]?.id ?? "";
   } catch (caught) {
     error.value = errorMessage(caught);
@@ -192,7 +200,7 @@ function goToStep(target: number) {
 }
 
 async function generate() {
-  if (offerId.value === null) return;
+  if (!offerIds.value.length) return;
   error.value = "";
   neededTools.value = [];
   activity.value = [];
@@ -205,7 +213,7 @@ async function generate() {
   try {
     const outcome = await api.generatePlan({
       provider: provider.value,
-      offerId: offerId.value,
+      offerIds: offerIds.value,
       slots,
       withImages: withImages.value,
       generateImages: withImages.value && imageMode.value === "generate",
@@ -270,7 +278,7 @@ async function allowAndRetry() {
             <h1>Plan next week</h1>
             <span class="pw-agent-badge"><Icon name="sparkles" :size="11" /> Editorial agent</span>
           </div>
-          <p class="wp-subtitle">{{ week }} · Your AI agent drafts one idea per post, based on the offer you pick.</p>
+          <p class="wp-subtitle">{{ week }} · Your AI agent drafts one idea per post, based on the offers you pick.</p>
         </div>
       </div>
     </div>
@@ -381,24 +389,24 @@ async function allowAndRetry() {
               </div>
             </SectionCard>
 
-            <SectionCard icon="target" title="Focus offer" hint="The primary CTA and case angle every idea sells.">
+            <SectionCard icon="target" title="Focus offers" hint="Pick one or more. Ideas are shared out across them, each selling its own offer.">
               <div v-if="hasOffers" class="wp-details">
                 <div class="pw-search">
                   <Icon name="search" :size="14" />
                   <input v-model="offerSearch" type="search" placeholder="Search offers by name or promise" aria-label="Search offers" />
                 </div>
-                <div class="pw-offers" role="radiogroup" aria-label="Focus offer" :aria-busy="offersLoading">
+                <div class="pw-offers" role="group" aria-label="Focus offers" :aria-busy="offersLoading">
                   <button
                     v-for="item in offers"
                     :key="item.id"
                     type="button"
                     class="pw-offer"
-                    :class="{ selected: offerId === item.id }"
-                    role="radio"
-                    :aria-checked="offerId === item.id"
-                    @click="offer = item"
+                    :class="{ selected: isPicked(item) }"
+                    role="checkbox"
+                    :aria-checked="isPicked(item)"
+                    @click="toggleOffer(item)"
                   >
-                    <span class="pw-radio" aria-hidden="true"></span>
+                    <span class="pw-checkbox" aria-hidden="true"><Icon name="check" :size="11" /></span>
                     <span class="pw-offer-text">
                       <span class="pw-offer-name">{{ item.name }}</span>
                       <span class="pw-offer-promise">{{ item.promise }}</span>
@@ -648,8 +656,8 @@ async function allowAndRetry() {
 
           <dl class="pw-summary-facts">
             <div>
-              <dt>Focus offer</dt>
-              <dd>{{ offer?.name ?? "Not picked" }}</dd>
+              <dt>{{ pickedOffers.length > 1 ? "Focus offers" : "Focus offer" }}</dt>
+              <dd>{{ pickedOffers.length ? pickedOffers.map((item) => item.name).join(", ") : "Not picked" }}</dd>
             </div>
             <div>
               <dt>Written by</dt>

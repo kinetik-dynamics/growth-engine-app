@@ -211,7 +211,8 @@ export interface PlanSlot {
 
 export interface PlanRequest {
   provider: string;
-  offerId: number;
+  /** Focus offers in pick order. Slots are shared out across them in turn. */
+  offerIds: number[];
   slots: PlanSlot[];
   withImages: boolean;
   /** Draw the images with the image API, not only write their briefs. */

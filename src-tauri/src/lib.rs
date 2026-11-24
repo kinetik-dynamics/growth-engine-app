@@ -559,25 +559,33 @@ async fn generate_plan(app: AppHandle, request: plan::PlanRequest) -> Result<Pla
     if request.slots.is_empty() {
         return Err("Add at least one post to plan.".into());
     }
+    if request.offer_ids.is_empty() {
+        return Err("Pick at least one focus offer.".into());
+    }
     CANCEL_PLAN.store(false, Ordering::Relaxed);
     let config = signed_in(&app)?;
     let base_url = &config.session.base_url;
     let agent = cli::provider_name(&request.provider);
 
-    report(&app, "stage", format!("Loading the offer and company profile from {base_url}"));
-    // Fetched on its own: the offers list is paginated, so the pick may be on any page.
-    let offer = api::get(base_url, &config.token, &format!("/api/offers/{}", request.offer_id))
-        .await
-        .map_err(|error| {
-            if error.contains(" 404 ") {
-                "That offer no longer exists on the server. Go back and pick another.".to_string()
-            } else {
-                error
-            }
-        })?["offer"]
-        .clone();
+    report(&app, "stage", format!("Loading the offers and company profile from {base_url}"));
+    // Each fetched on its own: the offers list is paginated, so a pick may be on any page.
+    let mut offers = Vec::with_capacity(request.offer_ids.len());
+    for offer_id in &request.offer_ids {
+        let offer = api::get(base_url, &config.token, &format!("/api/offers/{offer_id}"))
+            .await
+            .map_err(|error| {
+                if error.contains(" 404 ") {
+                    "One of the picked offers no longer exists on the server. Go back and pick again.".to_string()
+                } else {
+                    error
+                }
+            })?["offer"]
+            .clone();
+        offers.push(offer);
+    }
     let company = api::get(base_url, &config.token, "/api/me").await?["company"].clone();
-    let offer_name = text(&offer["name"]);
+    let offer_names: Vec<Option<String>> = offers.iter().map(|offer| text(&offer["name"])).collect();
+    let slot_offers = plan::slot_offers(request.slots.len(), offers.len());
 
     let image_api = if request.with_images && request.generate_images {
         Some(image_api(&app)?.ok_or("Add an image API key in Settings > Image API, or pick \"Write image prompts only\".")?)
@@ -596,7 +604,8 @@ async fn generate_plan(app: AppHandle, request: plan::PlanRequest) -> Result<Pla
         &skills,
         &slot_skills,
         &company,
-        &offer,
+        &offers,
+        &slot_offers,
         &request.slots,
         topic.as_ref(),
         request.with_images,
@@ -610,8 +619,8 @@ async fn generate_plan(app: AppHandle, request: plan::PlanRequest) -> Result<Pla
         &app,
         "stage",
         format!(
-            "Built the brief: offer \"{}\", skills {}, {} slots ({} characters)",
-            offer_name.as_deref().unwrap_or("?"),
+            "Built the brief: offers {}, skills {}, {} slots ({} characters)",
+            offer_names.iter().map(|name| format!("\"{}\"", name.as_deref().unwrap_or("?"))).collect::<Vec<_>>().join(", "),
             skill_names.iter().map(|name| format!("\"{name}\"")).collect::<Vec<_>>().join(", "),
             request.slots.len(),
             prompt.chars().count()
@@ -651,8 +660,8 @@ async fn generate_plan(app: AppHandle, request: plan::PlanRequest) -> Result<Pla
             channel_platform: Some(slot.platform.clone()),
             topic_title: topic_title.clone(),
             topic_description: topic_description.clone(),
-            offer_id: Some(request.offer_id),
-            offer_name: offer_name.clone(),
+            offer_id: slot_offers.get(index).and_then(|&i| request.offer_ids.get(i)).copied(),
+            offer_name: slot_offers.get(index).and_then(|&i| offer_names.get(i)).cloned().flatten(),
             suggested_draft: idea.draft,
             image_prompt: if request.with_images { idea.image_prompt } else { None },
             provider: Some(request.provider.clone()),
