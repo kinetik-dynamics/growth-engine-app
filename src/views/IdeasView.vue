@@ -8,6 +8,7 @@ import { plannedChannel } from "../channels";
 import PlanWeekView from "./PlanWeekView.vue";
 import IdeaDetailView from "./IdeaDetailView.vue";
 import BulkPublishView from "./BulkPublishView.vue";
+import IdeaOverviewModal from "../components/IdeaOverviewModal.vue";
 
 defineProps<{ session: Session }>();
 const emit = defineEmits<{ openSettings: [] }>();
@@ -25,6 +26,8 @@ const notice = ref("");
 const newTitle = ref("");
 const planning = ref(false);
 const openIdeaId = ref<string | null>(null);
+/** The idea shown in the overview modal, opened by clicking its card. */
+const previewIdeaId = ref<string | null>(null);
 const tab = ref<IdeaTab>("drafts");
 const confirmDeleteId = ref<string | null>(null);
 
@@ -33,6 +36,7 @@ const picked = ref<Map<string, Idea>>(new Map());
 const bulkIdeas = ref<Idea[] | null>(null);
 
 const openIdea = computed(() => ideas.value?.find((idea) => idea.id === openIdeaId.value) ?? null);
+const previewIdea = computed(() => ideas.value?.find((idea) => idea.id === previewIdeaId.value) ?? null);
 const allOnPagePicked = computed(() => !!ideas.value?.length && ideas.value.every((idea) => picked.value.has(idea.id)));
 
 async function load(target = page.value) {
@@ -165,6 +169,12 @@ function channelStyle(idea: Idea) {
   return channel ? { "--ch": channel.color, "--ch-soft": channel.soft } : undefined;
 }
 
+/** The overview's button goes on to the full Write post page. */
+function writeFromPreview() {
+  openIdeaId.value = previewIdeaId.value;
+  previewIdeaId.value = null;
+}
+
 function actionLabel(idea: Idea) {
   const state = publishState(idea);
   return state === "Sent" ? "Edit post" : state === "Draft" ? "Continue draft" : "Write post";
@@ -262,9 +272,17 @@ function actionLabel(idea: Idea) {
           :class="{ picked: picked.has(idea.id), 'has-channel': plannedChannel(idea) }"
           :style="channelStyle(idea)"
         >
-          <div class="iv-card-body">
+          <div
+            class="iv-card-body iv-openable"
+            role="button"
+            tabindex="0"
+            :aria-label="`View the idea “${idea.title}”`"
+            @click="previewIdeaId = idea.id"
+            @keydown.enter.self.prevent="previewIdeaId = idea.id"
+            @keydown.space.self.prevent="previewIdeaId = idea.id"
+          >
             <div class="iv-card-top">
-              <label class="iv-source">
+              <label class="iv-source" @click.stop>
                 <input type="checkbox" :checked="picked.has(idea.id)" :aria-label="`Select the idea “${idea.title}”`" @change="togglePicked(idea)" />
                 {{ idea.source }}
               </label>
@@ -325,5 +343,15 @@ function actionLabel(idea: Idea) {
         @change="goToPage"
       />
     </div>
+
+    <IdeaOverviewModal
+      v-if="previewIdea"
+      :key="previewIdea.id"
+      :idea="previewIdea"
+      :action-label="actionLabel(previewIdea)"
+      @close="previewIdeaId = null"
+      @write="writeFromPreview"
+      @saved="onSaved"
+    />
   </div>
 </template>
