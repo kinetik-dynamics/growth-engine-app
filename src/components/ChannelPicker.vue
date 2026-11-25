@@ -11,7 +11,7 @@ const emit = defineEmits<{ toggle: [id: string]; connect: [] }>();
 <template>
   <div v-if="!channels.length" class="cp-empty">
     <p class="cp-empty-title">No channels connected yet</p>
-    <p>Connect LinkedIn in the web app's Settings, then come back to publish.</p>
+    <p>Connect LinkedIn, Facebook or your website in the web app's Settings, then come back to publish.</p>
     <button type="button" class="cp-connect" @click="emit('connect')">Open connections</button>
   </div>
   <div v-else class="cp-grid">

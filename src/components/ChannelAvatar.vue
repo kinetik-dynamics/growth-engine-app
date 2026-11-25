@@ -4,7 +4,11 @@ import type { ComposerChannel } from "../api";
 
 const props = withDefaults(defineProps<{ channel: ComposerChannel; size?: "sm" | "md" }>(), { size: "md" });
 
-const mark = computed(() => (props.channel.platform === "Facebook" ? { label: "f", color: "#1877F2" } : { label: "in", color: "#0A66C2" }));
+const marks: Record<string, { label: string; color: string }> = {
+  Facebook: { label: "f", color: "#1877F2" },
+  Website: { label: "W", color: "#047857" },
+};
+const mark = computed(() => marks[props.channel.platform] ?? { label: "in", color: "#0A66C2" });
 </script>
 
 <template>
