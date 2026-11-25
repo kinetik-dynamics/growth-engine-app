@@ -14,6 +14,7 @@ import {
 import Icon from "../components/Icon.vue";
 import SkillsPanel from "../components/SkillsPanel.vue";
 import ImageApiPanel from "../components/ImageApiPanel.vue";
+import ResearchPromptPanel from "../components/ResearchPromptPanel.vue";
 import type { IconName } from "../icons";
 import { settingsSection, type SettingsSection } from "../settingsNav";
 
@@ -28,6 +29,9 @@ const appVersion = ref("");
 /* Idea skills and image API: their panels report back for the side panel */
 const skillCount = ref<number | null>(null);
 const skillDirty = ref(false);
+const offerSkillCount = ref<number | null>(null);
+const offerSkillDirty = ref(false);
+const promptDirty = ref(false);
 const imageApi = ref<ImageApiStatus | null>(null);
 
 /* AI agents */
@@ -128,6 +132,24 @@ const NAV = computed<{ id: Tab; label: string; icon: IconName; sub: string; dot?
     dot: skillDirty.value ? "warn" : undefined,
   },
   {
+    id: "offerSkills",
+    label: "Offer skills",
+    icon: "package",
+    sub: offerSkillDirty.value
+      ? "Unsaved changes"
+      : offerSkillCount.value === null
+        ? "Instructions for offers"
+        : `${offerSkillCount.value} ${offerSkillCount.value === 1 ? "skill" : "skills"}`,
+    dot: offerSkillDirty.value ? "warn" : undefined,
+  },
+  {
+    id: "prompts",
+    label: "Prompts",
+    icon: "terminal",
+    sub: promptDirty.value ? "Unsaved changes" : "Lead research",
+    dot: promptDirty.value ? "warn" : undefined,
+  },
+  {
     id: "agents",
     label: "AI agents",
     icon: "bot",
@@ -163,6 +185,7 @@ onMounted(async () => {
   loadChannelTokens();
   api.getImageApi().then((status) => (imageApi.value = status)).catch(() => {});
   api.listSkills().then((skills) => (skillCount.value = skills.length)).catch(() => {});
+  api.listOfferSkills().then((skills) => (offerSkillCount.value = skills.length)).catch(() => {});
   try {
     appVersion.value = await getVersion();
   } catch {
@@ -219,6 +242,18 @@ onMounted(async () => {
           @dirty="skillDirty = $event"
           @count="skillCount = $event"
         />
+
+        <!-- Offer skills: kept mounted like idea skills -->
+        <SkillsPanel
+          v-show="tab === 'offerSkills'"
+          kind="offer"
+          :website-url="session.websiteUrl"
+          @dirty="offerSkillDirty = $event"
+          @count="offerSkillCount = $event"
+        />
+
+        <!-- Prompts: kept mounted so an open edit survives switching sections -->
+        <ResearchPromptPanel v-show="tab === 'prompts'" @dirty="promptDirty = $event" />
 
         <!-- Image API -->
         <ImageApiPanel v-if="tab === 'images'" @status="imageApi = $event" />

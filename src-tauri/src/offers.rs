@@ -23,6 +23,23 @@ pub struct OfferRequest {
     /// Optional steer, e.g. "offers for construction firms".
     #[serde(default)]
     pub focus: Option<String>,
+    /// ICP ids to base the offers on; empty means every ICP.
+    #[serde(default)]
+    pub icp_ids: Vec<i64>,
+    /// Case study ids to base the offers on; empty means every one.
+    #[serde(default)]
+    pub proof_ids: Vec<i64>,
+    /// The offer skill whose instructions the agent follows.
+    #[serde(default)]
+    pub skill_id: Option<String>,
+}
+
+/// Keeps the items whose `id` is in `ids`; an empty `ids` keeps them all.
+pub fn only_ids(items: Vec<Value>, ids: &[i64]) -> Vec<Value> {
+    if ids.is_empty() {
+        return items;
+    }
+    items.into_iter().filter(|item| item["id"].as_i64().is_some_and(|id| ids.contains(&id))).collect()
 }
 
 impl OfferRequest {
@@ -99,6 +116,7 @@ pub fn build_prompt(
     existing_offers: &[String],
     count: u32,
     focus: Option<&str>,
+    skill: Option<(&str, &str)>,
 ) -> String {
     let mut prompt = String::from(
         "You are the offer strategist for a B2B studio. Draft new offers the company can take to its \
@@ -112,6 +130,13 @@ pub fn build_prompt(
          - is narrow enough that the buyer instantly knows it is for them\n\
          - has a clear promise, a short list of deliverables and a realistic timeline\n",
     );
+
+    if let Some((name, content)) = skill {
+        prompt.push_str(&format!(
+            "\n# Offer skill: {name}\n\nFollow these instructions when you draft the offers. They override the general guidance above where they differ.\n\n{}\n",
+            content.trim()
+        ));
+    }
 
     prompt.push_str("\n# Company overview\n\n");
     prompt.push_str(&serde_json::to_string_pretty(company).unwrap_or_default());
@@ -201,7 +226,10 @@ mod tests {
             &["AI Automation Sprint".into()],
             3,
             Some("Construction"),
+            Some(("Sharp", "BE SHARP")),
         );
+        assert!(prompt.contains("# Offer skill: Sharp\n\nFollow these instructions"));
+        assert!(prompt.contains("BE SHARP"));
 
         assert!(prompt.contains("\"name\": \"Construction firms\""));
         assert!(!prompt.contains("\"pain\""), "blank fields are left out");
@@ -209,6 +237,13 @@ mod tests {
         assert!(prompt.contains("- AI Automation Sprint\n"));
         assert!(prompt.contains("exactly 3 objects"));
         assert!(prompt.contains("None yet. Keep promises grounded"));
+    }
+
+    #[test]
+    fn only_ids_filters_and_empty_keeps_all() {
+        let items = vec![json!({ "id": 1 }), json!({ "id": 2 })];
+        assert_eq!(only_ids(items.clone(), &[]).len(), 2);
+        assert_eq!(only_ids(items, &[2]), vec![json!({ "id": 2 })]);
     }
 
     #[test]

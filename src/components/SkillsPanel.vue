@@ -5,10 +5,12 @@ import { channelsFor } from "../channels";
 import Icon from "./Icon.vue";
 import PlatformIcon from "./PlatformIcon.vue";
 
-const props = defineProps<{ websiteUrl: string | null }>();
+const props = defineProps<{ websiteUrl: string | null; kind?: "idea" | "offer" }>();
 /** Tells Settings whether an edit is unsaved, for its side panel. */
 const emit = defineEmits<{ dirty: [dirty: boolean]; count: [count: number] }>();
 
+const isOffer = computed(() => props.kind === "offer");
+const label = computed(() => (isOffer.value ? "Offer skills" : "Idea skills"));
 const channels = channelsFor(props.websiteUrl);
 
 const skills = ref<Skill[] | null>(null);
@@ -37,7 +39,11 @@ watch(dirty, (value) => emit("dirty", value));
 async function load() {
   error.value = "";
   try {
-    [skills.value, channelSkills.value] = await Promise.all([api.listSkills(), api.listChannelSkills()]);
+    if (isOffer.value) {
+      skills.value = await api.listOfferSkills();
+    } else {
+      [skills.value, channelSkills.value] = await Promise.all([api.listSkills(), api.listChannelSkills()]);
+    }
     emit("count", skills.value.length);
   } catch (caught) {
     error.value = errorMessage(caught);
@@ -102,7 +108,7 @@ async function startNew() {
 
 async function useTemplate() {
   try {
-    content.value = await api.skillTemplate();
+    content.value = await (isOffer.value ? api.offerSkillTemplate() : api.skillTemplate());
     onInput();
   } catch (caught) {
     error.value = errorMessage(caught);
@@ -127,13 +133,17 @@ async function save() {
   error.value = notice.value = "";
   saving.value = true;
   try {
-    const skill =
-      editing.value === "new"
+    const id = editing.value as string;
+    const skill = isOffer.value
+      ? id === "new"
+        ? await api.createOfferSkill(name.value, content.value)
+        : await api.updateOfferSkill(id, name.value, content.value)
+      : id === "new"
         ? await api.createSkill(name.value, content.value)
-        : await api.updateSkill(editing.value as string, name.value, content.value);
+        : await api.updateSkill(id, name.value, content.value);
     await load();
     open(skill);
-    notice.value = "Skill saved. The next plan uses it.";
+    notice.value = isOffer.value ? "Skill saved. Pick it when you generate offers." : "Skill saved. The next plan uses it.";
   } catch (caught) {
     error.value = errorMessage(caught);
   } finally {
@@ -157,7 +167,7 @@ async function remove() {
   if (!editingSkill.value) return;
   error.value = "";
   try {
-    await api.deleteSkill(editingSkill.value.id);
+    await (isOffer.value ? api.deleteOfferSkill(editingSkill.value.id) : api.deleteSkill(editingSkill.value.id));
     await load();
     close(true);
   } catch (caught) {
@@ -178,7 +188,7 @@ defineExpose({ dirty });
       </button>
       <div class="sk-editor-title">
         <h2>{{ editing === "new" ? "New skill" : saved.name }}</h2>
-        <p>{{ editing === "new" ? "Name it and write the instructions the agent follows." : `Updated ${editingSkill ? updated(editingSkill) : ""}` }}</p>
+        <p>{{ editing === "new" ? (isOffer ? "Name it and write the instructions the agent follows when drafting offers." : "Name it and write the instructions the agent follows."): `Updated ${editingSkill ? updated(editingSkill) : ""}` }}</p>
       </div>
       <span v-if="editingSkill?.isDefault" class="st-pill info">Default</span>
     </div>
@@ -218,14 +228,14 @@ defineExpose({ dirty });
 
     <div class="st-actions">
       <div class="sk-actions-left">
-        <template v-if="editingSkill && !editingSkill.isDefault">
+        <template v-if="editingSkill && (isOffer || !editingSkill.isDefault)">
           <div v-if="confirmingDelete" class="st-confirm">
-            <span>Delete "{{ editingSkill.name }}"? Channels using it switch to the default skill.</span>
+            <span>Delete "{{ editingSkill.name }}"?{{ isOffer ? "" : " Channels using it switch to the default skill." }}</span>
             <button class="btn btn-sm btn-danger-solid" @click="remove">Delete skill</button>
             <button class="btn btn-sm" @click="confirmingDelete = false">Keep it</button>
           </div>
           <template v-else>
-            <button class="st-btn" @click="makeDefault"><Icon name="check" :size="14" /> Make default</button>
+            <button v-if="!isOffer" class="st-btn" @click="makeDefault"><Icon name="check" :size="14" /> Make default</button>
             <button class="st-btn sk-danger" @click="confirmingDelete = true"><Icon name="trash" :size="14" /> Delete</button>
           </template>
         </template>
@@ -245,8 +255,9 @@ defineExpose({ dirty });
     <div class="pub-section sk-cards-col">
       <div class="pub-section-head st-section-head">
         <div>
-          <h2>Idea skills{{ skills ? ` (${skills.length})` : "" }}</h2>
-          <p>Writing instructions sent to the AI agent with every plan. Open a skill to edit it.</p>
+          <h2>{{ label }}{{ skills ? ` (${skills.length})` : "" }}</h2>
+          <p v-if="isOffer">Instructions the AI agent follows when it drafts offers. Pick one on the Generate offers page.</p>
+          <p v-else>Writing instructions sent to the AI agent with every plan. Open a skill to edit it.</p>
         </div>
         <button class="st-btn" @click="startNew"><Icon name="plus" :size="14" /> New skill</button>
       </div>
@@ -259,8 +270,8 @@ defineExpose({ dirty });
 
       <div v-else-if="!skills.length" class="pub-empty">
         <Icon name="fileText" :size="32" />
-        <p class="pub-empty-title">No idea skills yet</p>
-        <p>Create one to tell the agent how to write ideas.</p>
+        <p class="pub-empty-title">No {{ label.toLowerCase() }} yet</p>
+        <p>{{ isOffer ? "Create one to tell the agent how to draft offers." : "Create one to tell the agent how to write ideas." }}</p>
       </div>
 
       <div v-else class="sk-grid">
@@ -272,10 +283,11 @@ defineExpose({ dirty });
           </span>
           <span class="sk-card-preview">{{ preview(skill.content) || "Empty skill" }}</span>
           <span class="sk-card-foot">
-            <span class="sk-card-channels">
+            <span v-if="!isOffer" class="sk-card-channels">
               <span v-for="channel in channelsUsing(skill)" :key="channel.id" :title="channel.name"><PlatformIcon :platform="channel.platform" size="sm" /></span>
               <span v-if="!channelsUsing(skill).length" class="sk-card-unused">No channel</span>
             </span>
+            <span v-else></span>
             <span class="sk-card-date">Updated {{ updated(skill) }}</span>
           </span>
         </button>
@@ -286,7 +298,7 @@ defineExpose({ dirty });
       </div>
     </div>
 
-    <aside class="sk-defaults" aria-label="Skill per channel">
+    <aside v-if="!isOffer" class="sk-defaults" aria-label="Skill per channel">
       <div class="sk-defaults-head">
         <span class="st-label">Skill per channel</span>
         <p>Picked by default when you plan next week. You can still change it on the plan page.</p>

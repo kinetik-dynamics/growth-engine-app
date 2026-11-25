@@ -4,6 +4,7 @@ mod cli;
 mod db;
 mod image;
 mod offers;
+mod research;
 mod plan;
 mod store;
 
@@ -129,12 +130,17 @@ async fn list_offers(
 /// One of the main site's read-only pages, as the JSON its `/api/app/*` endpoint sends.
 #[tauri::command]
 async fn site_page(app: AppHandle, page: String) -> Result<Value, String> {
-    const PAGES: [&str; 4] = ["overview", "icps", "proof", "publish"];
+    const PAGES: [&str; 6] = ["overview", "icps", "proof", "publish", "queue", "pipeline"];
     if !PAGES.contains(&page.as_str()) {
         return Err(format!("Unknown page: {page}"));
     }
     let config = signed_in(&app)?;
     let mut result = api::get(&config.session.base_url, &config.token, &format!("/api/app/{page}")).await?;
+    if page == "queue" {
+        if let Some(items) = result["items"].as_array_mut() {
+            research::overlay(items, &db::pending_lead_research(&store::database(&app)?)?);
+        }
+    }
     if page == "publish" {
         if let Ok(conn) = store::database(&app) {
             if let Some(posts) = result["posts"].as_array_mut() {
@@ -248,6 +254,34 @@ fn set_default_skill(app: AppHandle, id: String) -> Result<(), String> {
 #[tauri::command]
 fn skill_template() -> String {
     store::DEFAULT_SKILL.to_string()
+}
+
+#[tauri::command]
+fn list_offer_skills(app: AppHandle) -> Result<Vec<db::Skill>, String> {
+    db::list_offer_skills(&store::database(&app)?)
+}
+
+#[tauri::command]
+fn create_offer_skill(app: AppHandle, name: String, content: String) -> Result<db::Skill, String> {
+    let (name, content) = checked_skill(&name, &content)?;
+    db::create_offer_skill(&store::database(&app)?, &name, &content, now_ms())
+}
+
+#[tauri::command]
+fn update_offer_skill(app: AppHandle, id: String, name: String, content: String) -> Result<db::Skill, String> {
+    let (name, content) = checked_skill(&name, &content)?;
+    db::update_offer_skill(&store::database(&app)?, &id, &name, &content, now_ms())
+}
+
+#[tauri::command]
+fn delete_offer_skill(app: AppHandle, id: String) -> Result<(), String> {
+    db::delete_offer_skill(&store::database(&app)?, &id)
+}
+
+/// The built-in offer skill text, for starting a new offer skill from a template.
+#[tauri::command]
+fn offer_skill_template() -> String {
+    store::DEFAULT_OFFER_SKILL.to_string()
 }
 
 #[tauri::command]
@@ -721,6 +755,267 @@ async fn run_agent(app: &AppHandle, provider: &str, prompt: String, allowed_tool
     .map_err(|e| e.to_string())?
 }
 
+/* Lead research: the AI agent fills gaps in the Queue */
+
+const RESEARCH_PROMPT_SETTING: &str = "lead_research_prompt";
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ResearchPrompt {
+    prompt: String,
+    is_default: bool,
+}
+
+fn research_prompt(app: &AppHandle) -> Result<String, String> {
+    let saved = db::get_setting(&store::database(app)?, RESEARCH_PROMPT_SETTING)?;
+    Ok(saved.filter(|prompt| !prompt.trim().is_empty()).unwrap_or_else(|| research::DEFAULT_PROMPT.to_string()))
+}
+
+#[tauri::command]
+fn get_research_prompt(app: AppHandle) -> Result<ResearchPrompt, String> {
+    let prompt = research_prompt(&app)?;
+    Ok(ResearchPrompt { is_default: prompt.trim() == research::DEFAULT_PROMPT.trim(), prompt })
+}
+
+#[tauri::command]
+fn save_research_prompt(app: AppHandle, prompt: String) -> Result<ResearchPrompt, String> {
+    if prompt.trim().is_empty() {
+        return Err("Write the instructions first, or reset to the built-in prompt.".into());
+    }
+    db::set_setting(&store::database(&app)?, RESEARCH_PROMPT_SETTING, Some(prompt.trim()))?;
+    get_research_prompt(app)
+}
+
+#[tauri::command]
+fn reset_research_prompt(app: AppHandle) -> Result<ResearchPrompt, String> {
+    db::set_setting(&store::database(&app)?, RESEARCH_PROMPT_SETTING, None)?;
+    get_research_prompt(app)
+}
+
+#[derive(Serialize)]
+struct FieldCount {
+    field: &'static str,
+    count: usize,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ResearchPlan {
+    total: usize,
+    needing: usize,
+    /// Leads with gaps that are skipped because they were researched before.
+    already_researched: usize,
+    fields: Vec<FieldCount>,
+}
+
+/// The queue items as the main site lists them, with research that is not
+/// synced yet shown on top.
+async fn queue_items(app: &AppHandle, config: &Config) -> Result<Vec<Value>, String> {
+    let queue = api::get(&config.session.base_url, &config.token, "/api/app/queue").await?;
+    let mut items = queue["items"].as_array().cloned().unwrap_or_default();
+    research::overlay(&mut items, &db::pending_lead_research(&store::database(app)?)?);
+    Ok(items)
+}
+
+/// How many queue items have gaps the agent could fill, and how many of
+/// those were already researched and are skipped.
+#[tauri::command]
+async fn research_plan(app: AppHandle, include_researched: bool, only: Option<Vec<research::Target>>) -> Result<ResearchPlan, String> {
+    let items = queue_items(&app, &signed_in(&app)?).await?;
+    let total = items.len();
+    let only = only.unwrap_or_default();
+    let with_gaps = research::pick_work(items.clone(), &only, true, None).len();
+    let work = research::pick_work(items, &only, include_researched, None);
+    let mut counts: Vec<FieldCount> = Vec::new();
+    for (_, missing) in &work {
+        for &field in missing {
+            match counts.iter_mut().find(|known| known.field == field) {
+                Some(known) => known.count += 1,
+                None => counts.push(FieldCount { field, count: 1 }),
+            }
+        }
+    }
+    Ok(ResearchPlan { total, needing: work.len(), already_researched: with_gaps - work.len(), fields: counts })
+}
+
+/// How many items have research waiting to be synced.
+#[tauri::command]
+fn pending_research_count(app: AppHandle) -> Result<usize, String> {
+    Ok(db::pending_lead_research(&store::database(&app)?)?.len())
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SyncSummary {
+    sent: usize,
+    updated: usize,
+    fields_filled: usize,
+}
+
+/// How many items go to the main site in one request (its limit is 50).
+const RESEARCH_PER_SYNC: usize = 25;
+
+/// Sends the research found so far to the main site, which fills only the
+/// fields that are still blank there. Sent findings are forgotten locally;
+/// anything that fails to send stays for the next try.
+#[tauri::command]
+async fn sync_lead_research(app: AppHandle) -> Result<SyncSummary, String> {
+    let config = signed_in(&app)?;
+    let pending = db::pending_lead_research(&store::database(&app)?)?;
+    if pending.is_empty() {
+        return Err("There is no new research to sync.".into());
+    }
+
+    let mut summary = SyncSummary { sent: 0, updated: 0, fields_filled: 0 };
+    for chunk in pending.chunks(RESEARCH_PER_SYNC) {
+        let items: Vec<Value> = chunk.iter().map(|found| found.payload.clone()).collect();
+        let response = api::post(&config.session.base_url, &config.token, "/api/leads/research", &serde_json::json!({ "items": items }))
+            .await
+            .map_err(|error| {
+                format!(
+                    "Couldn't sync the research. {error}\nIf it says 404 or 500, the website needs the latest update: deploy it and run `php artisan migrate`. Nothing was lost; sync again once it is fixed."
+                )
+            })?;
+        db::clear_lead_research(&store::database(&app)?, chunk)?;
+        summary.sent += chunk.len();
+        for result in response["updated"].as_array().into_iter().flatten() {
+            let count = result["fields"].as_array().map_or(0, Vec::len);
+            if count > 0 {
+                summary.updated += 1;
+                summary.fields_filled += count;
+            }
+        }
+    }
+    Ok(summary)
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ResearchRequest {
+    provider: String,
+    /// The most leads to research in this run; none means all.
+    #[serde(default)]
+    limit: Option<usize>,
+    /// Research leads that were researched before too.
+    #[serde(default)]
+    include_researched: bool,
+    /// Research only these items.
+    #[serde(default)]
+    only: Vec<research::Target>,
+}
+
+#[derive(Serialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+enum ResearchOutcome {
+    #[serde(rename_all = "camelCase")]
+    Done { checked: usize, updated: usize, fields_filled: usize, failed: usize, cancelled: bool },
+    /// The agent was refused tools (web search, page fetch) and found nothing.
+    PermissionNeeded { provider: String, tools: Vec<String> },
+}
+
+/// Researches every queue item that has gaps, a few at a time, and saves
+/// what the agent finds on the main site after each batch. Only blank
+/// fields are filled. Progress is emitted as `plan-progress`.
+#[tauri::command]
+async fn research_leads(app: AppHandle, request: ResearchRequest) -> Result<ResearchOutcome, String> {
+    CANCEL_PLAN.store(false, Ordering::Relaxed);
+    let config = signed_in(&app)?;
+    let agent = cli::provider_name(&request.provider);
+
+    report(&app, "stage", "Loading the queue");
+    let items = queue_items(&app, &config).await?;
+    let work = research::pick_work(items, &request.only, request.include_researched, request.limit.filter(|limit| *limit > 0));
+    if work.is_empty() {
+        return Err(if request.only.is_empty() {
+            "Nothing to research: every lead either has all of its fields or was researched before.".into()
+        } else {
+            "This lead already has all of its fields.".to_string()
+        });
+    }
+    report(&app, "stage", format!("Researching {} {}", work.len(), if work.len() == 1 { "lead" } else { "leads" }));
+
+    let (instructions, allowed_tools) = {
+        let conn = store::database(&app)?;
+        (research_prompt(&app)?, db::allowed_tools(&conn, &request.provider)?)
+    };
+    if !allowed_tools.is_empty() {
+        report(&app, "stage", format!("{agent} may use: {}", allowed_tools.join(", ")));
+    }
+
+    let batches: Vec<&[research::Work]> = work.chunks(research::BATCH_SIZE).collect();
+    let (mut updated, mut fields_filled, mut failed, mut checked, mut cancelled) = (0, 0, 0, 0, false);
+
+    for (number, batch) in batches.iter().enumerate() {
+        if CANCEL_PLAN.load(Ordering::Relaxed) {
+            cancelled = true;
+            break;
+        }
+        report(&app, "stage", format!("Batch {} of {}: researching {} leads with {agent}", number + 1, batches.len(), batch.len()));
+
+        let briefs: Vec<Value> = batch.iter().map(|(item, missing)| research::brief(item, missing)).collect();
+        let prompt = research::build_prompt(&instructions, &briefs);
+        let run = match run_agent(&app, &request.provider, prompt, allowed_tools.clone()).await {
+            Ok(run) => run,
+            Err(_) if CANCEL_PLAN.load(Ordering::Relaxed) => {
+                cancelled = true;
+                break;
+            }
+            Err(error) if checked == 0 => return Err(error),
+            Err(error) => {
+                report(&app, "log", format!("Batch {} failed: {error}", number + 1));
+                failed += batch.len();
+                continue;
+            }
+        };
+
+        let findings = match research::parse_findings(&run.text) {
+            Ok(findings) => findings,
+            Err(_) if !run.denied.is_empty() && checked == 0 => {
+                return Ok(ResearchOutcome::PermissionNeeded { provider: request.provider, tools: run.denied });
+            }
+            Err(error) => {
+                report(&app, "log", format!("Batch {}: {error}", number + 1));
+                failed += batch.len();
+                continue;
+            }
+        };
+
+        // Only answers for leads in this batch are kept; the agent can invent others.
+        let body: Vec<Value> = findings
+            .iter()
+            .filter_map(|finding| {
+                let (_, missing) = batch.iter().find(|(item, _)| item["id"].as_i64() == Some(finding.id) && item["type"] == finding.kind.as_str())?;
+                Some(research::payload(finding, missing))
+            })
+            .collect();
+        if body.is_empty() {
+            failed += batch.len();
+            continue;
+        }
+
+        // Findings are kept in the app until the Queue's Sync button sends them.
+        {
+            let conn = store::database(&app)?;
+            let at = now_ms();
+            for item in &body {
+                db::save_lead_research(&conn, item["type"].as_str().unwrap_or_default(), item["id"].as_i64().unwrap_or_default(), item, at)?;
+            }
+        }
+        checked += batch.len();
+        for item in &body {
+            // Everything but the type and id is a field the agent filled.
+            let count = item.as_object().map_or(0, |fields| fields.len().saturating_sub(2));
+            if count > 0 {
+                updated += 1;
+                fields_filled += count;
+            }
+        }
+        report(&app, "stage", format!("Batch {} done: {updated} leads updated so far", number + 1));
+    }
+
+    Ok(ResearchOutcome::Done { checked, updated, fields_filled, failed, cancelled })
+}
+
 /* Offers drafted by the AI agent */
 
 #[derive(Serialize)]
@@ -797,6 +1092,13 @@ async fn generate_offers(app: AppHandle, request: offers::OfferRequest) -> Resul
     }
     let icps = api::get(base_url, &config.token, "/api/app/icps").await?["icps"].as_array().cloned().unwrap_or_default();
     let proof = api::get(base_url, &config.token, "/api/app/proof").await?["proof"].as_array().cloned().unwrap_or_default();
+    // Only the picked ICPs and case studies reach the agent; none picked means all.
+    let icps = offers::only_ids(icps, &request.icp_ids);
+    let proof = offers::only_ids(proof, &request.proof_ids);
+    let skill = match request.skill_id.as_deref().filter(|id| !id.is_empty()) {
+        Some(id) => Some(db::get_offer_skill(&store::database(&app)?, id)?),
+        None => None,
+    };
     let mut existing = site_offer_names(&config).await?;
 
     let (allowed_tools, drafted_names) = {
@@ -816,6 +1118,7 @@ async fn generate_offers(app: AppHandle, request: offers::OfferRequest) -> Resul
         &existing,
         request.count,
         request.focus(),
+        skill.as_ref().map(|skill| (skill.name.as_str(), skill.content.as_str())),
     );
     report(
         &app,
@@ -1066,6 +1369,18 @@ pub fn run() {
             delete_skill,
             set_default_skill,
             skill_template,
+            get_research_prompt,
+            save_research_prompt,
+            reset_research_prompt,
+            research_plan,
+            pending_research_count,
+            sync_lead_research,
+            research_leads,
+            list_offer_skills,
+            create_offer_skill,
+            update_offer_skill,
+            delete_offer_skill,
+            offer_skill_template,
             list_channel_skills,
             set_channel_skill,
             get_image_api,

@@ -2,7 +2,7 @@
 import { computed, ref, watch } from "vue";
 
 const props = withDefaults(
-  defineProps<{ label: string; imageUrl?: string | null; domain?: string | null; size?: "sm" | "md"; round?: boolean }>(),
+  defineProps<{ label: string; imageUrl?: string | null; domain?: string | null; size?: "sm" | "md" | "lg"; round?: boolean }>(),
   { imageUrl: null, domain: null, size: "md", round: false },
 );
 

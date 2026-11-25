@@ -75,6 +75,12 @@ export interface OfferRequest {
   count: number;
   /** Optional steer for the agent; blank lets it pick from all the material. */
   focus: string;
+  /** ICPs to base the offers on; empty means all of them. */
+  icpIds: number[];
+  /** Case studies to base the offers on; empty means all of them. */
+  proofIds: number[];
+  /** The offer skill the agent follows, or null for the built-in rules. */
+  skillId: string | null;
 }
 
 export type OfferOutcome =
@@ -395,6 +401,118 @@ export interface SitePages {
   icps: { icps: SiteIcp[]; offerOptions: Named[] };
   proof: { proof: SiteProof[]; offerOptions: Named[] };
   publish: { channels: PublishChannel[]; posts: SitePost[] };
+  queue: { items: QueueItem[]; icps: Named[] };
+  pipeline: { stages: PipelineStage[]; cards: PipelineCard[] };
+}
+
+/** One row of the Queue: a LinkedIn/Maps lead (a person) or a scanned company (a prospect). */
+export interface QueueItem {
+  id: number;
+  type: "lead" | "prospect";
+  company_name: string | null;
+  company_domain: string | null;
+  first_name: string | null;
+  last_name: string | null;
+  contact_name: string | null;
+  contact_title: string | null;
+  headline: string | null;
+  about: string | null;
+  experience: string[] | null;
+  email: string | null;
+  phone: string | null;
+  website: string | null;
+  avatar_url: string | null;
+  location: string | null;
+  source_label: string;
+  linkedin_url: string | null;
+  maps_url: string | null;
+  category: string | null;
+  rating: number | null;
+  reviews_count: number | null;
+  notes: string | null;
+  description: string | null;
+  search_label: string | null;
+  icp: Named | null;
+  enriched_at: string | null;
+  company_details: string | null;
+  contacts: KeyPerson[] | null;
+  researched_at: string | null;
+  /** Research found in the app that has not been synced to the website yet. */
+  unsynced?: boolean;
+  created_at: string;
+}
+
+export interface SyncSummary {
+  sent: number;
+  updated: number;
+  fieldsFilled: number;
+}
+
+/** A person worth approaching at a company, found by the research agent. */
+export interface KeyPerson {
+  name: string;
+  role: string | null;
+  email: string | null;
+  phone: string | null;
+  linkedin_url: string | null;
+}
+
+export interface ResearchPrompt {
+  prompt: string;
+  isDefault: boolean;
+}
+
+/** One queue item picked by hand for research. */
+export interface ResearchTarget {
+  type: "lead" | "prospect";
+  id: number;
+}
+
+export interface ResearchOptions {
+  provider: string;
+  /** The most leads to research in this run; null means all. */
+  limit: number | null;
+  /** Research leads that were researched before too. */
+  includeResearched: boolean;
+  /** Research only these items (ignores the limit and history). */
+  only: ResearchTarget[];
+}
+
+export interface ResearchPlan {
+  total: number;
+  needing: number;
+  /** Leads with gaps that are skipped because they were researched before. */
+  alreadyResearched: number;
+  fields: { field: string; count: number }[];
+}
+
+export type ResearchOutcome =
+  | { kind: "done"; checked: number; updated: number; fieldsFilled: number; failed: number; cancelled: boolean }
+  | { kind: "permissionNeeded"; provider: string; tools: string[] };
+
+export interface PipelineStage {
+  id: number;
+  name: string;
+  color: string;
+  is_default: boolean;
+}
+
+export interface PipelineCard {
+  key: string;
+  id: number;
+  type: "lead" | "prospect";
+  stage_id: number;
+  name: string | null;
+  company_name: string | null;
+  contact_title?: string | null;
+  avatar_url?: string | null;
+  company_domain: string | null;
+  location: string | null;
+  email?: string | null;
+  phone?: string | null;
+  website?: string | null;
+  icp: Named | null;
+  source_label: string;
 }
 
 /** Ideas generated from an offer. Older ideas only recorded the offer's name. */
@@ -438,7 +556,21 @@ export const api = {
   deleteSkill: (id: string) => invoke<void>("delete_skill", { id }),
   setDefaultSkill: (id: string) => invoke<void>("set_default_skill", { id }),
   skillTemplate: () => invoke<string>("skill_template"),
-  listChannelSkills: () => invoke<ChannelSkill[]>("list_channel_skills"),
+  getResearchPrompt: () => invoke<ResearchPrompt>("get_research_prompt"),
+  saveResearchPrompt: (prompt: string) => invoke<ResearchPrompt>("save_research_prompt", { prompt }),
+  resetResearchPrompt: () => invoke<ResearchPrompt>("reset_research_prompt"),
+  pendingResearchCount: () => invoke<number>("pending_research_count"),
+  /** Sends the research found so far to the website. */
+  syncLeadResearch: () => invoke<SyncSummary>("sync_lead_research"),
+  researchPlan: (includeResearched: boolean, only: ResearchTarget[]) =>
+    invoke<ResearchPlan>("research_plan", { includeResearched, only }),
+  researchLeads: (options: ResearchOptions) => invoke<ResearchOutcome>("research_leads", { request: options }),
+  listOfferSkills: () => invoke<Skill[]>("list_offer_skills"),
+  createOfferSkill: (name: string, content: string) => invoke<Skill>("create_offer_skill", { name, content }),
+  updateOfferSkill: (id: string, name: string, content: string) => invoke<Skill>("update_offer_skill", { id, name, content }),
+  deleteOfferSkill: (id: string) => invoke<void>("delete_offer_skill", { id }),
+  offerSkillTemplate: () => invoke<string>("offer_skill_template"),
+  listChannelSkills:() => invoke<ChannelSkill[]>("list_channel_skills"),
   setChannelSkill: (channelId: string, skillId: string | null) => invoke<void>("set_channel_skill", { channelId, skillId }),
   getImageApi: () => invoke<ImageApiStatus>("get_image_api"),
   saveImageApi: (provider: ImageProvider, model: string, apiKey: string | null) =>

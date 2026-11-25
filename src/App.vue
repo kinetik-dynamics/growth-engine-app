@@ -10,18 +10,22 @@ import OverviewView from "./views/OverviewView.vue";
 import IcpsView from "./views/IcpsView.vue";
 import ProofView from "./views/ProofView.vue";
 import PublishView from "./views/PublishView.vue";
+import QueueView from "./views/QueueView.vue";
+import PipelineView from "./views/PipelineView.vue";
 import Icon from "./components/Icon.vue";
 import type { IconName } from "./icons";
 import { checkForUpdate, updateAvailable, updateChecking, updateInstalling } from "./updater";
 import { startOverviewTimer, stopOverviewTimer } from "./overviewStore";
 
-type Page = "overview" | "offers" | "icps" | "proof" | "ideas" | "publish" | "settings";
+type Page = "overview" | "offers" | "icps" | "proof" | "queue" | "pipeline" | "ideas" | "publish" | "settings";
 
 const PAGE_ICONS: Record<Page, IconName> = {
   overview: "layoutDashboard",
   offers: "layers",
   icps: "target",
   proof: "award",
+  queue: "users",
+  pipeline: "layers",
   ideas: "lightbulb",
   publish: "calendar",
   settings: "settings",
@@ -30,6 +34,7 @@ const PAGE_ICONS: Record<Page, IconName> = {
 const NAV: { title: string | null; items: { id: Page; label: string }[] }[] = [
   { title: null, items: [{ id: "overview", label: "Overview" }] },
   { title: "Brain", items: [{ id: "offers", label: "Offers" }, { id: "icps", label: "ICPs" }, { id: "proof", label: "Proof" }] },
+  { title: "Leads", items: [{ id: "queue", label: "Queue" }, { id: "pipeline", label: "Pipeline" }] },
   { title: "Content", items: [{ id: "ideas", label: "Ideas" }, { id: "publish", label: "Publish" }] },
   { title: null, items: [{ id: "settings", label: "Settings" }] },
 ];
@@ -125,6 +130,8 @@ async function signOut() {
       <OffersView v-else-if="page === 'offers'" :session="session" @open-settings="page = 'settings'" />
       <IcpsView v-else-if="page === 'icps'" :session="session" />
       <ProofView v-else-if="page === 'proof'" />
+      <QueueView v-else-if="page === 'queue'" @open-settings="page = 'settings'" />
+      <PipelineView v-else-if="page === 'pipeline'" :session="session" />
       <IdeasView v-else-if="page === 'ideas'" :session="session" @open-settings="page = 'settings'" />
       <PublishView v-else-if="page === 'publish'" :session="session" />
       <SettingsView v-else :session="session" />

@@ -1,9 +1,10 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref } from "vue";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { api, errorMessage, type CliStatus, type OfferDraft, type PlanProgress, type Session, type SiteIcp, type SiteProof } from "../api";
+import { api, errorMessage, type CliStatus, type OfferDraft, type PlanProgress, type Session, type SiteIcp, type SiteProof, type Skill } from "../api";
 import Icon from "../components/Icon.vue";
 import SectionCard from "../components/SectionCard.vue";
+import MultiSelect from "../components/MultiSelect.vue";
 
 defineProps<{ session: Session }>();
 const emit = defineEmits<{ close: []; generated: [offers: OfferDraft[], requested: number]; openSettings: [] }>();
@@ -16,6 +17,12 @@ const error = ref("");
 const clis = ref<CliStatus[]>([]);
 const icps = ref<SiteIcp[]>([]);
 const proof = ref<SiteProof[]>([]);
+
+const skills = ref<Skill[]>([]);
+/* Picked material; nothing picked means the agent reads all of it. */
+const pickedIcps = ref<number[]>([]);
+const pickedProof = ref<number[]>([]);
+const skillId = ref("");
 
 const count = ref(3);
 const focus = ref("");
@@ -40,8 +47,15 @@ const thinMaterial = computed(() => !loading.value && !icps.value.length && !pro
 onMounted(async () => {
   unlisten = await listen<PlanProgress>("plan-progress", ({ payload }) => onProgress(payload));
   try {
-    const [detected, icpPage, proofPage] = await Promise.all([api.detectClis(), api.sitePage("icps"), api.sitePage("proof")]);
+    const [detected, icpPage, proofPage, offerSkills] = await Promise.all([
+      api.detectClis(),
+      api.sitePage("icps"),
+      api.sitePage("proof"),
+      api.listOfferSkills(),
+    ]);
     clis.value = detected;
+    skills.value = offerSkills;
+    skillId.value = offerSkills[0]?.id ?? "";
     icps.value = icpPage.icps;
     proof.value = proofPage.proof;
     provider.value = installed.value[0]?.id ?? "";
@@ -77,7 +91,12 @@ async function generate() {
   generating.value = true;
   timer = window.setInterval(() => elapsed.value++, 1000);
   try {
-    const outcome = await api.generateOffers({ provider: provider.value, count: count.value, focus: focus.value.trim() });
+    const outcome = await api.generateOffers({ provider: provider.value, count: count.value,
+      focus: focus.value.trim(),
+      icpIds: [...pickedIcps.value],
+      proofIds: [...pickedProof.value],
+      skillId: skillId.value || null,
+    });
     if (outcome.kind === "created") emit("generated", outcome.offers, count.value);
     else neededTools.value = outcome.tools;
   } catch (caught) {
@@ -153,6 +172,43 @@ async function allowAndRetry() {
               <div v-if="thinMaterial" class="wp-alert wp-alert-info" role="status" style="margin-top: 12px">
                 <Icon name="alertCircle" :size="16" />
                 <span>No ICPs or case studies yet, so the offers will rest on the company overview alone. Add them in the web app for sharper offers.</span>
+              </div>
+            </SectionCard>
+
+            <SectionCard icon="target" title="ICPs" hint="Pick one or more. Leave all unpicked to use every ICP.">
+              <MultiSelect
+                v-if="icps.length"
+                v-model="pickedIcps"
+                :options="icps.map((icp) => ({ id: icp.id, label: icp.name }))"
+                :disabled="generating"
+                placeholder="Search ICPs… (all if none picked)"
+              />
+              <p v-else class="wp-muted">No ICPs on the main site yet.</p>
+            </SectionCard>
+
+            <SectionCard icon="award" title="Proof" hint="Pick one or more case studies. Leave all unpicked to use every one.">
+              <MultiSelect
+                v-if="proof.length"
+                v-model="pickedProof"
+                :options="proof.map((study) => ({ id: study.id, label: study.title }))"
+                :disabled="generating"
+                placeholder="Search case studies… (all if none picked)"
+              />
+              <p v-else class="wp-muted">No case studies on the main site yet.</p>
+            </SectionCard>
+
+            <SectionCard icon="fileText" title="Offer skill" hint="The instructions the agent follows. Manage them in Settings > Offer skills.">
+              <label v-if="skills.length" class="wp-field">
+                <span>Skill</span>
+                <select v-model="skillId" class="wp-input" :disabled="generating">
+                  <option value="">None (built-in guidance only)</option>
+                  <option v-for="skill in skills" :key="skill.id" :value="skill.id">{{ skill.name }}</option>
+                </select>
+              </label>
+              <div v-else class="cp-empty">
+                <p class="cp-empty-title">No offer skills yet</p>
+                <p>Add one in Settings to steer how the agent writes offers.</p>
+                <button type="button" class="cp-connect" @click="emit('openSettings')">Open Settings</button>
               </div>
             </SectionCard>
 

@@ -10,6 +10,7 @@ use std::path::PathBuf;
 use tauri::{AppHandle, Manager};
 
 pub const DEFAULT_SKILL: &str = include_str!("../default-skill.md");
+pub const DEFAULT_OFFER_SKILL: &str = include_str!("../default-offer-skill.md");
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

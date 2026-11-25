@@ -149,6 +149,10 @@ struct Exit {
     success: bool,
 }
 
+/// A CLI that prints nothing for this long is stuck (usually its model
+/// stopped answering), so it is stopped instead of waiting out the full timeout.
+const IDLE_TIMEOUT: Duration = Duration::from_secs(240);
+
 /// Runs the program, handing each stdout line to `on_line` as it arrives.
 fn run(
     program: &Path,
@@ -208,9 +212,13 @@ fn run(
     });
 
     let deadline = Instant::now() + timeout;
+    let mut last_output = Instant::now();
     let status = loop {
         match receiver.recv_timeout(Duration::from_millis(100)) {
-            Ok(line) => on_line(&line),
+            Ok(line) => {
+                last_output = Instant::now();
+                on_line(&line);
+            }
             Err(RecvTimeoutError::Timeout) => {}
             // stdout is closed: the process is finishing.
             Err(RecvTimeoutError::Disconnected) => match child.try_wait() {
@@ -222,6 +230,13 @@ fn run(
         if cancel.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
             kill_tree(&mut child);
             return Err(STOPPED.into());
+        }
+        if last_output.elapsed() >= IDLE_TIMEOUT {
+            kill_tree(&mut child);
+            return Err(format!(
+                "The CLI printed nothing for {} minutes, so it was stopped. Its model is probably overloaded or stuck. Try again, or pick another agent.",
+                IDLE_TIMEOUT.as_secs() / 60
+            ));
         }
         if Instant::now() >= deadline {
             kill_tree(&mut child);
@@ -286,6 +301,41 @@ fn safe_tools(tools: &[String]) -> Vec<&str> {
         .collect()
 }
 
+/// Keys that usually hold what a tool is working on, most telling first.
+const DETAIL_KEYS: [&str; 10] = ["query", "q", "url", "command", "cmd", "file_path", "path", "pattern", "prompt", "description"];
+const MAX_DETAIL_CHARS: usize = 140;
+
+/// What a tool call is about (a search query, a URL, a command…), found in
+/// its arguments. CLIs differ in where they put them, so this looks through
+/// nested objects and JSON held in strings.
+fn tool_detail(value: &Value, depth: u8) -> Option<String> {
+    if depth > 3 {
+        return None;
+    }
+    match value {
+        Value::Object(map) => {
+            for key in DETAIL_KEYS {
+                if let Some(text) = map.get(key).and_then(Value::as_str).map(str::trim).filter(|text| !text.is_empty()) {
+                    return Some(text.chars().take(MAX_DETAIL_CHARS).collect());
+                }
+            }
+            map.values().filter(|inner| inner.is_object() || inner.is_string()).find_map(|inner| tool_detail(inner, depth + 1))
+        }
+        Value::String(text) if text.trim_start().starts_with('{') => {
+            serde_json::from_str::<Value>(text).ok().and_then(|parsed| tool_detail(&parsed, depth + 1))
+        }
+        _ => None,
+    }
+}
+
+/// "search_web: custom jewelry e-commerce" or just the tool's name.
+fn tool_label(name: &str, input: &Value) -> String {
+    match tool_detail(input, 0) {
+        Some(detail) => format!("{name}: {detail}"),
+        None => name.to_string(),
+    }
+}
+
 /// Interprets one line of Claude Code's `--output-format stream-json`.
 fn parse_claude_line(event: &Value, state: &mut StreamState) -> Vec<Progress> {
     match event["type"].as_str() {
@@ -303,8 +353,7 @@ fn parse_claude_line(event: &Value, state: &mut StreamState) -> Vec<Progress> {
             .into_iter()
             .flatten()
             .filter(|block| block["type"] == "tool_use")
-            .filter_map(|block| block["name"].as_str())
-            .map(|name| Progress::Tool(name.to_string()))
+            .filter_map(|block| Some(Progress::Tool(tool_label(block["name"].as_str()?, &block["input"]))))
             .collect(),
         Some("system") if event["subtype"] == "permission_denied" => {
             let tool = event["tool_name"].as_str().unwrap_or_default().to_string();
@@ -338,7 +387,7 @@ fn parse_antigravity_line(event: &Value, state: &mut StreamState) -> Vec<Progres
                     _ => vec![],
                 },
                 Some("tool") if step["state"] == "ACTIVE" => {
-                    vec![Progress::Tool(step["tool_name"].as_str().unwrap_or("a tool").to_string())]
+                    vec![Progress::Tool(tool_label(step["tool_name"].as_str().unwrap_or("a tool"), step))]
                 }
                 _ => vec![],
             }
@@ -379,7 +428,7 @@ fn parse_opencode_line(event: &Value, state: &mut StreamState) -> Vec<Progress> 
             }
         }
         Some("tool_use") => {
-            vec![Progress::Tool(event["part"]["tool"].as_str().unwrap_or("a tool").to_string())]
+            vec![Progress::Tool(tool_label(event["part"]["tool"].as_str().unwrap_or("a tool"), &event["part"]["state"]["input"]))]
         }
         Some("error") => {
             state.failed = Some(
@@ -539,6 +588,13 @@ mod tests {
         assert_eq!(progress, [Progress::Text("[{\"title\"".into()), Progress::Text(":\"A\"}]".into())]);
         assert_eq!(state.text(), r#"[{"title":"A"}]"#);
         assert!(state.denied.is_empty());
+    }
+
+    #[test]
+    fn tool_labels_carry_what_the_tool_is_working_on() {
+        assert_eq!(tool_label("search_web", &serde_json::json!({ "query": "acme ceo" })), "search_web: acme ceo");
+        assert_eq!(tool_label("fetch", &serde_json::json!({ "args": "{\"url\":\"https://acme.test\"}" })), "fetch: https://acme.test");
+        assert_eq!(tool_label("run_command", &serde_json::json!({ "tool_name": "run_command", "state": "ACTIVE" })), "run_command");
     }
 
     #[test]

@@ -267,6 +267,13 @@ CREATE TABLE IF NOT EXISTS skills (
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS offer_skills (
+    id         TEXT PRIMARY KEY,
+    name       TEXT NOT NULL,
+    content    TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS channel_skills (
     channel_id TEXT PRIMARY KEY,
     skill_id   TEXT NOT NULL
@@ -291,6 +298,13 @@ CREATE TABLE IF NOT EXISTS offer_drafts (
     updated_at     INTEGER NOT NULL,
     synced_at      INTEGER,
     remote_id      INTEGER
+);
+CREATE TABLE IF NOT EXISTS lead_research (
+    kind          TEXT NOT NULL,
+    item_id       INTEGER NOT NULL,
+    payload       TEXT NOT NULL,
+    researched_at INTEGER NOT NULL,
+    PRIMARY KEY (kind, item_id)
 );
 CREATE TABLE IF NOT EXISTS post_analytics (
     post_id             TEXT PRIMARY KEY,
@@ -752,6 +766,57 @@ pub fn set_default_skill(conn: &Connection, id: &str) -> Result<(), String> {
     conn.execute("UPDATE skills SET is_default = (id = ?1)", [id]).map(|_| ()).map_err(describe)
 }
 
+/* Offer skills: instructions the agent follows when it drafts offers */
+
+const OFFER_SKILL_COLUMNS: &str = "id, name, content, 0, created_at, updated_at";
+
+pub fn list_offer_skills(conn: &Connection) -> Result<Vec<Skill>, String> {
+    let mut statement = conn
+        .prepare(&format!("SELECT {OFFER_SKILL_COLUMNS} FROM offer_skills ORDER BY name COLLATE NOCASE, created_at"))
+        .map_err(describe)?;
+    let skills = statement
+        .query_map([], skill_from_row)
+        .map_err(describe)?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(describe)?;
+    Ok(skills)
+}
+
+pub fn get_offer_skill(conn: &Connection, id: &str) -> Result<Skill, String> {
+    conn.query_row(&format!("SELECT {OFFER_SKILL_COLUMNS} FROM offer_skills WHERE id = ?1"), [id], skill_from_row)
+        .map_err(|error| match error {
+            rusqlite::Error::QueryReturnedNoRows => "This offer skill no longer exists.".to_string(),
+            other => describe(other),
+        })
+}
+
+pub fn create_offer_skill(conn: &Connection, name: &str, content: &str, now: u64) -> Result<Skill, String> {
+    let id = format!("offer-skill-{now}");
+    conn.execute(
+        "INSERT INTO offer_skills (id, name, content, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?4)",
+        params![id, name, content, now as i64],
+    )
+    .map_err(describe)?;
+    get_offer_skill(conn, &id)
+}
+
+pub fn update_offer_skill(conn: &Connection, id: &str, name: &str, content: &str, now: u64) -> Result<Skill, String> {
+    let changed = conn
+        .execute(
+            "UPDATE offer_skills SET name = ?2, content = ?3, updated_at = ?4 WHERE id = ?1",
+            params![id, name, content, now as i64],
+        )
+        .map_err(describe)?;
+    if changed == 0 {
+        return Err("This offer skill no longer exists.".into());
+    }
+    get_offer_skill(conn, id)
+}
+
+pub fn delete_offer_skill(conn: &Connection, id: &str) -> Result<(), String> {
+    conn.execute("DELETE FROM offer_skills WHERE id = ?1", [id]).map(|_| ()).map_err(describe)
+}
+
 pub fn channel_skills(conn: &Connection) -> Result<Vec<ChannelSkill>, String> {
     let mut statement = conn
         .prepare("SELECT channel_id, skill_id FROM channel_skills WHERE skill_id IN (SELECT id FROM skills) ORDER BY channel_id")
@@ -940,6 +1005,58 @@ pub fn mark_offer_synced(conn: &Connection, id: &str, remote_id: Option<i64>, sy
     )
     .map(|_| ())
     .map_err(describe)
+}
+
+/* Lead research waiting to be sent to the main site */
+
+/// What the research agent found for one queue item, not yet synced.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PendingResearch {
+    pub kind: String,
+    pub id: i64,
+    /// The body for `/api/leads/research`: type, id and the fields found.
+    pub payload: serde_json::Value,
+    pub researched_at: u64,
+}
+
+/// Keeps the findings for an item; a newer run replaces an unsynced older one.
+pub fn save_lead_research(conn: &Connection, kind: &str, id: i64, payload: &serde_json::Value, researched_at: u64) -> Result<(), String> {
+    conn.execute(
+        "INSERT INTO lead_research (kind, item_id, payload, researched_at) VALUES (?1, ?2, ?3, ?4) \
+         ON CONFLICT(kind, item_id) DO UPDATE SET payload = excluded.payload, researched_at = excluded.researched_at",
+        params![kind, id, payload.to_string(), researched_at as i64],
+    )
+    .map(|_| ())
+    .map_err(describe)
+}
+
+pub fn pending_lead_research(conn: &Connection) -> Result<Vec<PendingResearch>, String> {
+    let mut statement = conn
+        .prepare("SELECT kind, item_id, payload, researched_at FROM lead_research ORDER BY researched_at, rowid")
+        .map_err(describe)?;
+    let rows = statement
+        .query_map([], |row| {
+            let payload: String = row.get(2)?;
+            Ok(PendingResearch {
+                kind: row.get(0)?,
+                id: row.get(1)?,
+                payload: serde_json::from_str(&payload).unwrap_or_default(),
+                researched_at: row.get::<_, i64>(3)? as u64,
+            })
+        })
+        .map_err(describe)?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(describe)?;
+    Ok(rows)
+}
+
+/// Forgets findings that reached the main site.
+pub fn clear_lead_research(conn: &Connection, sent: &[PendingResearch]) -> Result<(), String> {
+    for item in sent {
+        conn.execute("DELETE FROM lead_research WHERE kind = ?1 AND item_id = ?2 AND researched_at = ?3", params![item.kind, item.id, item.researched_at as i64])
+            .map_err(describe)?;
+    }
+    Ok(())
 }
 
 pub fn get_post_analytics(conn: &Connection, post_id: &str) -> Result<Option<crate::analytics::PostAnalytics>, String> {
