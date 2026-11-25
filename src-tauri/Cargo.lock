@@ -1452,7 +1452,7 @@ dependencies = [
 
 [[package]]
 name = "growth-engine-app"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "base64 0.22.1",
  "reqwest 0.12.28",
