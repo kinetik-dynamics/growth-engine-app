@@ -34,11 +34,13 @@ async function sync() {
     await load();
   }
 }
-/** The one lead being researched, or null when researching the whole queue. */
-const researchTarget = ref<{ type: "lead" | "prospect"; id: number; name: string } | null>(null);
+type Target = { type: "lead" | "prospect"; id: number; name: string };
+/** The leads picked for research; empty means the whole queue. */
+const researchTargets = ref<Target[]>([]);
 
-function openResearch(item?: QueueItem) {
-  researchTarget.value = item ? { type: item.type, id: item.id, name: primaryLabel(item) } : null;
+function openResearch(picked?: QueueItem | QueueItem[]) {
+  const list = picked === undefined ? [] : Array.isArray(picked) ? picked : [picked];
+  researchTargets.value = list.map((item) => ({ type: item.type, id: item.id, name: primaryLabel(item) }));
   researching.value = true;
 }
 
@@ -89,7 +91,7 @@ watch(researching, (open) => (open ? autoRefresh.stop() : autoRefresh.start()));
 
 function closeResearch() {
   researching.value = false;
-  researchTarget.value = null;
+  researchTargets.value = [];
   load();
 }
 
@@ -130,11 +132,36 @@ function clearFilters() {
   source.value = "all";
 }
 
-/* Keep a valid row selected as the list changes. */
+/** Leads ticked in the list, by keyOf(). Always replaced, never mutated, so Vue re-renders. */
+const checked = ref<Set<string>>(new Set());
+
+function toggleChecked(item: QueueItem) {
+  const key = keyOf(item);
+  const next = new Set(checked.value);
+  if (next.has(key)) next.delete(key);
+  else next.add(key);
+  checked.value = next;
+}
+
+const checkedItems = computed(() => visible.value.filter((item) => checked.value.has(keyOf(item))));
+const allChecked = computed(() => visible.value.length > 0 && checkedItems.value.length === visible.value.length);
+const someChecked = computed(() => checkedItems.value.length > 0 && !allChecked.value);
+
+function toggleAll() {
+  checked.value = allChecked.value ? new Set() : new Set(visible.value.map(keyOf));
+}
+
+function clearChecked() {
+  checked.value = new Set();
+}
+
+/* Keep a valid row selected as the list changes, and drop ticks on rows that are no longer shown. */
 watch(
   visible,
   (rows) => {
     if (!rows.some((item) => keyOf(item) === selectedKey.value)) selectedKey.value = rows[0] ? keyOf(rows[0]) : null;
+    const keys = new Set(rows.map(keyOf));
+    if ([...checked.value].some((key) => !keys.has(key))) checked.value = new Set([...checked.value].filter((key) => keys.has(key)));
   },
   { immediate: true },
 );
@@ -179,7 +206,7 @@ onUnmounted(() => {
 <template>
   <ResearchLeadsView
     v-if="researching"
-    :target="researchTarget"
+    :targets="researchTargets"
     @close="closeResearch"
     @changed="load()"
     @open-settings="researching = false; emit('openSettings')"
@@ -189,8 +216,15 @@ onUnmounted(() => {
     <div class="pub-header">
       <div class="pub-header-left"><h1 class="pub-title">Lead Approval Queue</h1></div>
       <div class="lq-head-actions">
-        <button type="button" class="lq-research" :disabled="!items?.length" title="Fill the empty fields of every lead with the AI agent" @click="openResearch()">
-          <Icon name="sparkles" :size="14" /> Research leads
+        <button
+          type="button"
+          class="lq-research"
+          :disabled="!items?.length"
+          :title="checkedItems.length ? `Research only the ${checkedItems.length} selected leads` : 'Fill the empty fields of every lead with the AI agent'"
+          @click="checkedItems.length ? openResearch(checkedItems) : openResearch()"
+        >
+          <Icon name="sparkles" :size="14" />
+          {{ checkedItems.length ? `Research ${checkedItems.length} selected` : "Research leads" }}
         </button>
         <RefreshControls v-model="autoRefreshOn" :countdown="countdown" :refreshing="busy" size="sm" @refresh="load()" />
         <button
@@ -285,6 +319,18 @@ onUnmounted(() => {
         </div>
 
         <div class="lq-bar">
+          <label class="lq-check-all">
+            <input
+              type="checkbox"
+              :checked="allChecked"
+              :indeterminate="someChecked"
+              :disabled="!visible.length"
+              aria-label="Select all leads in the list"
+              @change="toggleAll"
+            />
+            <span>{{ checkedItems.length ? `${checkedItems.length}/${visible.length} selected` : "Select all" }}</span>
+          </label>
+          <button v-if="checkedItems.length" type="button" class="lq-linkbtn" @click="clearChecked">Clear</button>
           <span class="lq-bar-count">{{ visible.length === items.length ? `${items.length} leads` : `${visible.length} of ${items.length}` }}</span>
         </div>
 
@@ -302,9 +348,17 @@ onUnmounted(() => {
             v-for="item in visible"
             :key="keyOf(item)"
             class="lq-row"
-            :class="{ active: keyOf(item) === selectedKey }"
+            :class="{ active: keyOf(item) === selectedKey, checked: checked.has(keyOf(item)) }"
             @click="selectedKey = keyOf(item)"
           >
+            <input
+              type="checkbox"
+              class="lq-row-check"
+              :checked="checked.has(keyOf(item))"
+              :aria-label="`Select ${primaryLabel(item)}`"
+              @click.stop
+              @change="toggleChecked(item)"
+            />
             <CompanyAvatar :label="primaryLabel(item)" :image-url="item.avatar_url" :domain="item.company_domain" round style="margin-top: 2px" />
             <div class="lq-row-main">
               <div class="lq-row-top">

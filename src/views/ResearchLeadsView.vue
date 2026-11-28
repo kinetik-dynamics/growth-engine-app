@@ -5,8 +5,8 @@ import { api, errorMessage, type CliStatus, type PlanProgress, type ResearchPlan
 import Icon from "../components/Icon.vue";
 import SectionCard from "../components/SectionCard.vue";
 
-/** When set, only this one lead is researched. */
-const props = defineProps<{ target?: { type: "lead" | "prospect"; id: number; name: string } | null }>();
+/** When not empty, only these leads are researched. */
+const props = defineProps<{ targets?: { type: "lead" | "prospect"; id: number; name: string }[] }>();
 const emit = defineEmits<{ close: []; changed: []; openSettings: [] }>();
 
 const LIMITS = [10, 20, 30, 50, 100, 0];
@@ -21,8 +21,17 @@ function savedLimit() {
   }
 }
 
-const single = computed(() => !!props.target);
-const only = computed<ResearchTarget[]>(() => (props.target ? [{ type: props.target.type, id: props.target.id }] : []));
+const picked = computed(() => props.targets ?? []);
+const single = computed(() => picked.value.length === 1);
+/** Hand-picked leads (one or many): no limit, history ignored. */
+const handPicked = computed(() => picked.value.length > 0);
+const only = computed<ResearchTarget[]>(() => picked.value.map(({ type, id }) => ({ type, id })));
+/** The first few picked names, for the summary under the numbers. */
+const pickedNames = computed(() => {
+  const names = picked.value.slice(0, 5).map((item) => item.name).join(", ");
+  const more = picked.value.length - 5;
+  return more > 0 ? `${names} +${more} more` : names;
+});
 /** 0 means every lead. */
 const limit = ref(savedLimit());
 const includeResearched = ref(false);
@@ -66,7 +75,7 @@ const elapsedLabel = computed(() => `${Math.floor(elapsed.value / 60)}:${String(
 /** How many leads this run will take. */
 const toResearch = computed(() => {
   const needing = plan.value?.needing ?? 0;
-  return single.value || !limit.value ? needing : Math.min(limit.value, needing);
+  return handPicked.value || !limit.value ? needing : Math.min(limit.value, needing);
 });
 const silentFor = computed(() => elapsed.value - lastSign.value);
 const silentLabel = computed(() => `${Math.floor(silentFor.value / 60)}:${String(silentFor.value % 60).padStart(2, "0")}`);
@@ -139,7 +148,7 @@ async function start() {
   try {
     const outcome = await api.researchLeads({
       provider: provider.value,
-      limit: single.value || !limit.value ? null : limit.value,
+      limit: handPicked.value || !limit.value ? null : limit.value,
       includeResearched: includeResearched.value,
       only: only.value,
     });
@@ -187,11 +196,17 @@ async function allowAndRetry() {
         </button>
         <div style="min-width: 0">
           <div class="wp-title-row">
-            <h1>{{ single ? "Research lead" : "Research leads" }}</h1>
+            <h1>{{ single ? "Research lead" : handPicked ? `Research ${picked.length} selected leads` : "Research leads" }}</h1>
             <span class="pw-agent-badge"><Icon name="sparkles" :size="11" /> Research agent</span>
           </div>
           <p class="wp-subtitle">
-            {{ single ? `Your AI agent looks up ${target?.name} and fills the fields that are still empty.` : "Your AI agent checks the leads in the Queue and fills the fields that are still empty." }}
+            {{
+              single
+                ? `Your AI agent looks up ${picked[0].name} and fills the fields that are still empty.`
+                : handPicked
+                  ? `Your AI agent looks up the ${picked.length} leads you selected and fills the fields that are still empty.`
+                  : "Your AI agent checks the leads in the Queue and fills the fields that are still empty."
+            }}
           </p>
         </div>
       </div>
@@ -213,13 +228,19 @@ async function allowAndRetry() {
           <template v-else>
             <SectionCard
               icon="users"
-              :title="single ? 'The lead' : 'What the agent checks'"
-              :hint="single ? 'Only this lead is researched, even if it was researched before.' : 'The Queue is read from the main site each time you start. Findings stay in this app until you sync them.'"
+              :title="single ? 'The lead' : handPicked ? 'Selected leads' : 'What the agent checks'"
+              :hint="
+                single
+                  ? 'Only this lead is researched, even if it was researched before.'
+                  : handPicked
+                    ? 'Only these leads are researched, even if they were researched before.'
+                    : 'The Queue is read from the main site each time you start. Findings stay in this app until you sync them.'
+              "
             >
               <dl v-if="!single" class="go-sources">
                 <div>
-                  <dt><Icon name="users" :size="12" /> In the queue</dt>
-                  <dd>{{ plan?.total ?? 0 }}</dd>
+                  <dt><Icon name="users" :size="12" /> {{ handPicked ? "Selected" : "In the queue" }}</dt>
+                  <dd>{{ handPicked ? picked.length : (plan?.total ?? 0) }}</dd>
                 </div>
                 <div>
                   <dt><Icon name="search" :size="12" /> To research</dt>
@@ -230,7 +251,8 @@ async function allowAndRetry() {
                   <dd>{{ batches }}</dd>
                 </div>
               </dl>
-              <p v-else class="rl-single">{{ target?.name }}</p>
+              <p v-else class="rl-single">{{ picked[0]?.name }}</p>
+              <p v-if="handPicked && !single" class="wp-muted" style="margin-top: 10px">{{ pickedNames }}</p>
               <div v-if="plan?.fields.length" class="rl-fields">
                 <span v-for="item in plan.fields" :key="item.field" class="bp-chip">
                   {{ FIELD_LABELS[item.field] ?? item.field }}{{ single ? "" : ` · ${item.count}` }}
@@ -239,6 +261,7 @@ async function allowAndRetry() {
               <div v-if="plan && !plan.needing" class="wp-alert wp-alert-info" role="status" style="margin-top: 12px">
                 <Icon name="checkCircle" :size="16" />
                 <span v-if="single">This lead already has all of its fields. Nothing to research.</span>
+                <span v-else-if="handPicked">The selected leads already have all of their fields. Nothing to research.</span>
                 <span v-else-if="plan.alreadyResearched">
                   Every lead with gaps was researched before ({{ plan.alreadyResearched }}). Tick "Include leads researched before" to try them again.
                 </span>
@@ -251,7 +274,7 @@ async function allowAndRetry() {
             </SectionCard>
 
             <SectionCard
-              v-if="!single"
+              v-if="!handPicked"
               icon="hash"
               title="Leads per run"
               hint="Research searches the web, so a big queue takes a long time. Leads left over stay for the next run."
