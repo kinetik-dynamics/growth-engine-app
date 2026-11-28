@@ -1,12 +1,13 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { api, errorMessage, type Named, type QueueItem } from "../api";
+import { api, errorMessage, type Named, type QueueItem, type SearchRun } from "../api";
 import { externalUrl, primaryLabel, ratingLabel, secondaryLabel, timeAgo } from "../leads";
 import CompanyAvatar from "../components/CompanyAvatar.vue";
 import Icon from "../components/Icon.vue";
 import InfoRow from "../components/InfoRow.vue";
 import RefreshControls from "../components/RefreshControls.vue";
+import SearchRunPicker from "../components/SearchRunPicker.vue";
 import ResearchLeadsView from "./ResearchLeadsView.vue";
 import { createAutoRefresh } from "../autoRefresh";
 
@@ -63,6 +64,36 @@ const websiteFilter = ref<Presence>("all");
 const source = ref("all");
 const sort = ref<SortKey>("newest");
 
+/* The extension import (search run) the list is narrowed to; null shows every lead. */
+const RUN_FILTER_KEY = "queue.runFilter";
+
+function savedRunFilter() {
+  try {
+    const raw = localStorage.getItem(RUN_FILTER_KEY);
+    const value = raw === null ? NaN : Number(raw);
+    return Number.isInteger(value) ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+const runs = ref<SearchRun[]>([]);
+const runFilter = ref<number | null>(savedRunFilter());
+const activeRun = computed(() => runs.value.find((run) => run.id === runFilter.value) ?? null);
+
+watch(runFilter, (value) => {
+  try {
+    if (value === null) localStorage.removeItem(RUN_FILTER_KEY);
+    else localStorage.setItem(RUN_FILTER_KEY, String(value));
+  } catch {
+    /* Storage blocked: the choice just won't survive a reload. */
+  }
+});
+
+function inRun(item: QueueItem) {
+  return runFilter.value === null || (item.import_run_ids ?? []).includes(runFilter.value);
+}
+
 function keyOf(item: Pick<QueueItem, "id" | "type">) {
   return `${item.type}-${item.id}`;
 }
@@ -75,6 +106,8 @@ async function load() {
     const result = await api.sitePage("queue");
     items.value = result.items;
     icps.value = result.icps;
+    runs.value = result.runs ?? [];
+    if (runFilter.value !== null && !runs.value.some((run) => run.id === runFilter.value)) runFilter.value = null;
     pendingCount.value = await api.pendingResearchCount().catch(() => pendingCount.value);
   } catch (caught) {
     error.value = errorMessage(caught);
@@ -107,6 +140,7 @@ const icpOptions = computed(() => [...new Set((items.value ?? []).filter((item) 
 const visible = computed(() => {
   const needle = search.value.trim().toLowerCase();
   const rows = (items.value ?? []).filter((item) => {
+    if (!inRun(item)) return false;
     if (source.value !== "all" && item.source_label !== source.value) return false;
     if (icpFilter.value === "none" ? item.icp !== null : icpFilter.value !== "all" && item.icp?.name !== icpFilter.value) return false;
     if (!passes(emailFilter.value, item.email) || !passes(phoneFilter.value, item.phone)) return false;
@@ -124,6 +158,10 @@ const visible = computed(() => {
   return rows;
 });
 
+/** The leads of the picked run (or all leads); counts and stats use this as their base. */
+const scoped = computed(() => (items.value ?? []).filter(inRun));
+
+/** Resets the list filters but keeps the picked search run. */
 function clearFilters() {
   search.value = "";
   icpFilter.value = "all";
@@ -170,7 +208,7 @@ const selected = computed(() => visible.value.find((item) => keyOf(item) === sel
 const selectedIndex = computed(() => visible.value.findIndex((item) => keyOf(item) === selectedKey.value));
 
 const stats = computed(() => {
-  const all = items.value ?? [];
+  const all = scoped.value;
   const leads = all.filter((item) => item.type === "lead");
   return [
     { label: "Total", value: all.length },
@@ -246,6 +284,11 @@ onUnmounted(() => {
     <div v-if="syncError || syncNotice" class="lq-sync-msg" :class="syncError ? 'bad' : 'ok'" :role="syncError ? 'alert' : 'status'">
       <span style="white-space: pre-wrap">{{ syncError || syncNotice }}</span>
       <button type="button" class="lq-linkbtn" @click="syncError = syncNotice = ''">Dismiss</button>
+    </div>
+
+    <div v-if="items && !error" class="lq-runbar">
+      <SearchRunPicker v-model="runFilter" :runs="runs" :total-leads="items.length" />
+      <span v-if="activeRun" class="lq-runbar-date">{{ new Date(activeRun.created_at).toLocaleDateString() }}</span>
     </div>
 
     <div v-if="error" class="lq-state">
@@ -331,7 +374,7 @@ onUnmounted(() => {
             <span>{{ checkedItems.length ? `${checkedItems.length}/${visible.length} selected` : "Select all" }}</span>
           </label>
           <button v-if="checkedItems.length" type="button" class="lq-linkbtn" @click="clearChecked">Clear</button>
-          <span class="lq-bar-count">{{ visible.length === items.length ? `${items.length} leads` : `${visible.length} of ${items.length}` }}</span>
+          <span class="lq-bar-count">{{ visible.length === scoped.length ? `${scoped.length} leads` : `${visible.length} of ${scoped.length}` }}</span>
         </div>
 
         <div class="lq-rows">
@@ -342,6 +385,7 @@ onUnmounted(() => {
             <template v-else>
               <p>No leads match these filters.</p>
               <button type="button" class="lq-linkbtn" @click="clearFilters">Clear filters</button>
+              <button v-if="runFilter !== null" type="button" class="lq-linkbtn" @click="runFilter = null">Show all leads</button>
             </template>
           </div>
           <div
@@ -403,6 +447,7 @@ onUnmounted(() => {
                 <span class="ld-badge ld-badge-gray">{{ selected.source_label }}</span>
                 <span v-if="selected.icp" class="ld-badge ld-badge-blue">{{ selected.icp.name }}</span>
                 <span v-if="selected.search_label" class="ld-badge ld-badge-outline">Search: {{ selected.search_label }}</span>
+                <span v-if="(selected.import_run_ids?.length ?? 0) > 1" class="ld-badge ld-badge-gray">In {{ selected.import_run_ids.length }} runs</span>
                 <span v-if="selected.unsynced" class="ld-badge ld-badge-amber" title="Found in this app. Press Sync to website to send it.">Not synced yet</span>
                 <span v-if="selected.researched_at" class="ld-badge ld-badge-green">
                   <Icon name="check" :size="12" /> Researched {{ timeAgo(selected.researched_at) }}
