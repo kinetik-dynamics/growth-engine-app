@@ -401,7 +401,7 @@ export interface SitePages {
   icps: { icps: SiteIcp[]; offerOptions: Named[] };
   proof: { proof: SiteProof[]; offerOptions: Named[] };
   publish: { channels: PublishChannel[]; posts: SitePost[] };
-  queue: { items: QueueItem[]; icps: Named[] };
+  queue: { items: QueueItem[]; icps: Named[]; runs: SearchRun[] };
   pipeline: { stages: PipelineStage[]; cards: PipelineCard[] };
 }
 
@@ -439,6 +439,20 @@ export interface QueueItem {
   researched_at: string | null;
   /** Research found in the app that has not been synced to the website yet. */
   unsynced?: boolean;
+  /** The extension imports (search runs) this lead came in with. Prospects always have []. */
+  import_run_ids: number[];
+  created_at: string;
+}
+
+/** One click on Import in the Chrome extension: the leads it brought in. */
+export interface SearchRun {
+  id: number;
+  label: string;
+  platform: "linkedin" | "google_maps";
+  icp: Named | null;
+  leads_count: number;
+  imported_count: number;
+  skipped_count: number;
   created_at: string;
 }
 
